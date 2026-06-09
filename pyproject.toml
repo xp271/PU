@@ -36,7 +36,7 @@ filterwarnings = [
     "ignore:Exception ignored in.*:pytest.PytestUnraisableExceptionWarning",
 ]
 markers = [
-    "model: tests for AgentConfig / ClaudeModel / ModelProvider / ModelId",
+    "model: tests for AgentConfig / ModelProvider / ModelId",
     "message: tests for AgentMessage discriminated union and serialization",
     "agent: tests for Agent class lifecycle (run/stream/permission)",
     "read: FileReadTool tests (validate_input / call / dedup / encoding)",

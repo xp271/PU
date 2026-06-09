@@ -16,20 +16,6 @@ StopReason = Literal["end_turn", "max_turns", "permission_denied", "error"]
 
 
 # ---------------------------------------------------------------------------
-# ClaudeModel — legacy Anthropic-only enum (retained for backward compatibility)
-# ---------------------------------------------------------------------------
-
-class ClaudeModel(str, Enum):
-    SONNET_4_5 = "claude-sonnet-4-5"
-    OPUS_4_7 = "claude-opus-4-7"
-    HAIKU_4_5 = "claude-haiku-4-5"
-
-    @classmethod
-    def known_values(cls) -> set[str]:
-        return {m.value for m in cls}
-
-
-# ---------------------------------------------------------------------------
 # ModelProvider & ModelId — provider-agnostic model identification
 # ---------------------------------------------------------------------------
 

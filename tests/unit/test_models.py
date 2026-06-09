@@ -3,21 +3,7 @@ from __future__ import annotations
 import pydantic
 import pytest
 
-from agent_core.models import AgentConfig, ClaudeModel
-
-
-@pytest.mark.model
-class TestClaudeModel:
-    def test_known_values_contains_all_members(self) -> None:
-        values = ClaudeModel.known_values()
-        assert "claude-sonnet-4-5" in values
-        assert "claude-opus-4-7" in values
-        assert "claude-haiku-4-5" in values
-
-    def test_member_value_matches_string(self) -> None:
-        assert ClaudeModel.SONNET_4_5.value == "claude-sonnet-4-5"
-        assert ClaudeModel.OPUS_4_7.value == "claude-opus-4-7"
-        assert ClaudeModel.HAIKU_4_5.value == "claude-haiku-4-5"
+from agent_core.models import AgentConfig
 
 
 @pytest.mark.model
