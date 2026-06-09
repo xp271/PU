@@ -23,7 +23,7 @@ src/agent_core/
 └── tools/               # 工具系统（详见第 2 节）
 ```
 
-**依赖**（`pyproject.toml`）: Python >= 3.12, pydantic >= 2, anthropic >= 0.105.2, aiofiles >= 24, mcp >= 1.0, tenacity >= 9, tree-sitter >= 0.24, tree-sitter-bash >= 0.23, charset-normalizer >= 3, python-frontmatter >= 1。
+**依赖**（`pyproject.toml`）: Python >= 3.12, pydantic >= 2, anthropic >= 0.105.2, openai >= 2, aiofiles >= 24, mcp >= 1.0, tenacity >= 9, tree-sitter >= 0.24, tree-sitter-bash >= 0.23, charset-normalizer >= 3, python-frontmatter >= 1。
 
 **测试框架**: pytest >= 9.0.3 + pytest-asyncio >= 1.4.0 + vcrpy >= 7（录制回放）。
 
@@ -45,8 +45,9 @@ from agent_core import (
     ToolResult,
     ErrorMessage,
 
-    # 模型常量
-    ClaudeModel,
+    # 模型标识 (Provider-agnostic)
+    ModelProvider,
+    ModelId,
 
     # 工具系统
     Tool,
@@ -71,7 +72,7 @@ from agent_core import (
 ```python
 from agent_core import Agent, AgentConfig
 
-config = AgentConfig(model="claude-sonnet-4-5", max_turns=20)
+config = AgentConfig(model="anthropic/claude-sonnet-4-5", max_turns=20)
 agent = Agent(config)
 result = await agent.run("帮我读取 README.md 的内容")
 ```
@@ -104,25 +105,42 @@ PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `model` | `str` | `"claude-sonnet-4-5"` | LLM 模型标识符。非已知模型名会触发 `ValueError`，除非设置 `allow_unknown_model=True`（此时仅发 warning）。 |
+| `model` | `str` | `"anthropic/claude-sonnet-4-5"` | 模型标识符，格式 `"provider/model-name"`（如 `"openai/gpt-4o"`）。省略 provider 时默认 `anthropic`（向后兼容）。非已知模型名触发 `ValueError`，除非 `allow_unknown_model=True`。 |
 | `max_turns` | `int` | `20` | 最大 turn 迭代次数。校验范围 1–500。 |
 | `permission_mode` | `PermissionMode` | `"ask"` | 默认权限模式：`"bypassPermissions"` / `"acceptEdits"` / `"ask"`。 |
 | `tools` | `list[str]` | `["*"]` | 可用工具名称列表。`["*"]` 表示全部已注册工具。不能为空列表。 |
 | `mcp_servers` | `dict[str, Any]` | `{}` | MCP 服务端配置，键为服务名。 |
 | `skills_dir` | `str \| None` | `None` | Skill 定义文件目录路径。 |
 | `hooks` | `list[Any]` | `[]` | Agent 启动时注册的 Hook 实例。 |
-| `allow_unknown_model` | `bool` | `False` | 为 `True` 时允许使用 `ClaudeModel` 枚举之外的模型标识（如代理/自托管场景）。 |
+| `api_keys` | `dict[str, str]` | `{}` | Provider → API Key 映射（如 `{"openai": "sk-..."}`）。缺省时从环境变量读取（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 等）。 |
+| `base_urls` | `dict[str, str]` | `{}` | Provider → 自定义 base URL（代理、自托管场景）。仅替换同 provider 的默认 API 端点。 |
+| `allow_unknown_model` | `bool` | `False` | 为 `True` 时允许使用已知 provider 列表之外的模型标识（如代理/自托管/兼容 API 场景）。 |
 
-**`ClaudeModel` 枚举**
+**`ModelProvider` 枚举**
 
 ```python
-class ClaudeModel(str, Enum):
-    SONNET_4_5 = "claude-sonnet-4-5"
-    OPUS_4_7   = "claude-opus-4-7"
-    HAIKU_4_5  = "claude-haiku-4-5"
+class ModelProvider(str, Enum):
+    ANTHROPIC = "anthropic"
+    OPENAI = "openai"
 ```
 
-提供 `known_values()` 类方法返回所有合法模型名的集合。
+**`ModelId` —— Provider 无关的模型标识**
+
+```python
+@dataclass(frozen=True)
+class ModelId:
+    provider: ModelProvider
+    name: str  # 例: "claude-sonnet-4-5", "gpt-4o"
+    
+    def __str__(self) -> str:
+        return f"{self.provider.value}/{self.name}"
+    
+    @classmethod
+    def parse(cls, raw: str) -> "ModelId":
+        """'provider/model' 格式解析；省略 provider 时默认 anthropic（向后兼容）。"""
+```
+
+`ModelProvider.known_models()` 返回 `{provider: [模型名列表]}`，`known_providers()` 返回 provider 枚举成员集合，`ModelId.known_values()` 返回所有合法 `"provider/model"` 字符串的集合。
 
 #### 1.5 运行结果 `AgentResult`
 
@@ -439,25 +457,108 @@ class BashInput(BaseModel):
 
 ---
 
-### 3. LLM API 集成层 & 结构化日志 (2 天)
+### 3. LLM 多 Provider 集成层 & 结构化日志 (3 天)
 
-**功能**: 封装 Anthropic Messages API，消息规范化，流式响应，全错误类型恢复，以及 turn-level 结构化日志。
+**功能**: Provider-agnostic LLM 客户端抽象，Anthropic + OpenAI 首批实现，消息双向规范化，流式响应，内部规范事件流，全错误类型恢复，turn-level 结构化日志。
 
-**原因**: Agent 主循环的唯一外部依赖就是 LLM API。流式断连、529 overloaded、context_length 超限在长任务中很常见，必须在集成层就预留恢复逻辑。没有结构化日志，Agent 循环出问题时几乎无法排查。
+**原因**: Agent 主循环的唯一外部依赖就是 LLM API，必须在集成层就支持多 provider。采用 Protocol ABC 模式，每个 provider 的细节隔离在各自实现中，内部统一使用 `AgentMessage` discriminated union 衍生的事件流。详案见 `agent-core-llm-multi-provider-plan.md`。
 
-**注意**: API 模型名以 Anthropic 官方文档为准。当前可用模型 ID 格式为 `claude-sonnet-4-5`、`claude-opus-4-7`、`claude-haiku-4-5` 等，不存在 `4-6` 的 Sonnet。代码中应以常量枚举当前合法值，启动时做校验。
+**架构总览**
 
-- [ ] `AsyncAnthropic` 封装，支持 api_key / base_url 配置注入
-- [ ] 模型名常量枚举（`ClaudeModel.SONNET_4_5 = "claude-sonnet-4-5"` 等），`AgentConfig` 启动时校验是否为已知合法值
-- [ ] 消息规范化 `normalize_messages()`：处理 system / user / assistant 角色交替，处理 tool_use / tool_result 配对校验
-- [ ] 流式响应异步迭代器：content_block_start / delta / stop，message_start / delta / stop 完整事件解析
-- [ ] 错误恢复策略：
-  - `max_output_tokens` → 自动截断追加 continue 请求（最多 3 次）
-  - `rate_limit` → 指数退避重试（tenacity，Retry-After header 优先）
-  - `overloaded` (HTTP 529) → 指数退避重试，区别于 rate_limit
-  - `context_length_exceeded` → 抛出不可恢复异常，通知调用方
-  - 流式中途断连 → 重连 + 从断点续接（发送 stop_reason 为 null 的 continue）
-- [ ] **结构化日志**：每个 turn 记录 `turn_index / model / input_tokens / output_tokens / tool_uses / latency_ms / error_type`，使用 Python `logging` + 统一 trace_id 贯穿整个 Agent 生命周期
+```
+                    ┌──────────────────────────┐
+                    │     query() 主循环        │
+                    │  (只消费 InternalEvent)   │
+                    └──────────┬───────────────┘
+                               │ AsyncGenerator[InternalEvent]
+                    ┌──────────▼───────────────┐
+                    │    BaseClient (ABC)      │
+                    │    stream_messages()     │
+                    └────┬──────────────┬──────┘
+                         │              │
+              ┌──────────▼──┐  ┌────────▼──────┐
+              │Anthropic    │  │OpenAI         │
+              │Client       │  │Client         │
+              │(anthropic   │  │(openai SDK)   │
+              │ SDK)        │  │               │
+              └─────────────┘  └───────────────┘
+```
+
+**内部规范事件 `InternalEvent`** — 在 `AgentMessage` 基础上扩充内部用类型：
+
+```python
+InternalEvent = Annotated[
+    AssistantText     # LLM 文本块 (复用已有)
+  | ToolUse           # LLM 工具调用请求 (复用已有)
+  | ToolResult        # 工具执行结果 (复用已有)
+  | ErrorMessage      # 异常/错误 (复用已有)
+  | TokenCounts       # 本轮 token 统计 (新增，内部用，不暴露给调用方)
+  | StopEvent         # 流终止信号 → 转DoneMessage (新增，内部用)
+  | StreamStart       # 流开始，携带 turn_index / model (新增，内部用)
+  , Field(discriminator="type")
+]
+```
+
+- [ ] **0. ModelProvider / ModelId** (`models.py`)：
+  - `ModelProvider` 枚举（ANTHROPIC / OPENAI）
+  - `ModelId` frozen dataclass（provider + name），`__str__` 输出 `"provider/name"`
+  - `ModelId.parse(raw: str)`：`"provider/model"` 格式解析；省略 provider 时默认 `anthropic`（向后兼容 `"claude-sonnet-4-5"`）
+  - `ModelProvider.known_models()` 返回 `{ModelProvider: [模型名列表]}`，`ModelId.known_values()` 返回所有合法 `"provider/model"` 字符串
+
+- [ ] **1. BaseClient 抽象** (`llm/base.py`)：
+  - 抽象方法 `stream_messages(messages, tools, system, model) -> AsyncGenerator[InternalEvent]`
+  - 工厂函数 `get_client(model_id: ModelId, config: AgentConfig) -> BaseClient` 按 provider 路由
+  - Client 生命周期：构造 → `stream_messages()` → 销毁（无状态，每次调用独立）
+
+- [ ] **2. 消息规范化** (`llm/normalize.py`)：
+  - 提供两个方向：
+    - **入站（inbound）**：Provider 的流式 chunk → `InternalEvent`（TextDelta → AssistantText, tool_use → ToolUse, usage → TokenCounts, stop → StopEvent）
+    - **出站（outbound）**：内部消息列表 → Provider 原生 API 格式（messages 列表 + system prompt + tools schema）
+  - 统一处理 tool_use / tool_result 配对校验
+  - 内部存储格式采用 Anthropic content-block 结构（更丰富），非 Anthropic provider 在出站时转换
+  - OpenAI 特有处理：`role: "tool"` ↔ content block `tool_result` 双向映射
+
+- [ ] **3. AnthropicClient** (`llm/anthropic.py`)：
+  - 封装 `AsyncAnthropic`，支持 api_key / base_url 配置注入
+  - 流式响应完整事件解析：content_block_start / delta / stop，message_start / delta / stop
+  - 特性：prompt caching 显式标记（provider-specific feature，其他 provider 忽略）
+  - 错误恢复：
+    - `max_output_tokens` → 自动截断 + continue（最多 3 次）
+    - `rate_limit` → tenacity 指数退避，Retry-After header 优先
+    - `overloaded` (529) → 指数退避（区别于 rate_limit）
+    - `context_length_exceeded` → 不可恢复异常
+    - 流式中途断连 → 重连 + stop_reason=null continue
+
+- [ ] **4. OpenAIClient** (`llm/openai.py`)：
+  - 封装 `AsyncOpenAI`，支持 api_key / base_url 配置注入
+  - 流式 Responses API / Chat Completions API（优先 Chat Completions，范围更广）
+  - 功能映射：
+    - tool_calls delta → ToolUse 事件（含 index 聚合）
+    - usage chunk → TokenCounts 事件
+    - finish_reason → StopEvent（含内容过滤检测）
+  - 错误恢复：
+    - `max_tokens` → 自动截断 + continue（最多 3 次）
+    - `rate_limit` (429) → tenacity 指数退避，Retry-After header 优先
+    - `server_error` (500/502/503) → 指数退避
+    - `context_length_exceeded` → 不可恢复异常
+    - `content_filter` → yield ErrorMessage + StopEvent(stop_reason="content_filtered")
+
+- [ ] **5. Tool schema 转换** (`llm/tool_schema.py`)：
+  - 从 Tool 注册表提取所有工具的 `input_schema()` JSON Schema
+  - Anthropic 格式：`{name, description, input_schema}` 列表
+  - OpenAI 格式：`{type: "function", function: {name, description, parameters}}` 列表
+  - Provider 无关的内部工具描述格式 → Provider 原生格式转换
+
+- [ ] **6. 错误恢复统一** (`llm/errors.py`)：
+  - per-provider 错误分类器：`classify_error(exception, provider) -> ErrorCategory`
+  - `ErrorCategory = Literal["rate_limit", "overloaded", "context_length", "content_filter", "transient", "fatal"]`
+  - 统一重试策略工厂：按 ErrorCategory + provider 返回 tenacity retry config
+  - 不可恢复错误统一抛出 `FatalLLMError(reason, provider, model)`
+
+- [ ] **7. 结构化日志** (`logging/tracer.py`)：
+  - 每个 turn 记录：`turn_index / provider / model / input_tokens / output_tokens / cache_read_tokens(Anthropic) / tool_uses / latency_ms / error_category`
+  - 统一 `trace_id`（uuid4）贯穿整个 Agent 生命周期
+  - 使用 Python `logging`，provider 相关的可选字段（cache_read_tokens 等）仅在适用时记录
 
 ---
 
@@ -712,11 +813,11 @@ class BashInput(BaseModel):
 
 | 阶段 | 条目 | 预估天数 |
 |------|------|----------|
-| Phase 1: 基础设施 | #1 脚手架 (2) + #2 Tool 框架 (2) + #3 API 集成 (2) | 6 |
+| Phase 1: 基础设施 | #1 脚手架 (2) + #2 Tool 框架 (2) + #3 多Provider集成 (3) | 7 |
 | Phase 2: Agent 核心循环 | #4 主循环 (4) + #5 管线+权限 (4) + #5.5 压缩 (2) + #6 MCP (2) | 12 |
 | Phase 3: 子Agent & 扩展 | #7 Agent 定义 (2) + #8 执行引擎 (5) + #9 Hooks/Plugin/Skills (2) | 9 |
 | Phase 4: 持久化 & 收尾 | #10 持久化 (2) + #11 测试/文档/发布 (2) | 4 |
-| **总计** | **12 条目** | **31 天 (~6.5 周)** |
+| **总计** | **12 条目** | **32 天 (~7 周)** |
 
 ---
 
@@ -732,6 +833,7 @@ dependencies = [
     "pydantic>=2",               # 配置校验 + Tool schema
     "python-frontmatter>=1",     # Skill/Agent markdown 解析
     "anthropic>=0.60,<1",        # Anthropic API SDK (开发时取最新 stable)
+    "openai>=2,<3",              # OpenAI API SDK (开发时取最新 stable)
     "mcp>=1.29,<2",              # MCP 协议 SDK
     "tenacity>=9",               # 重试策略
     "tree-sitter>=0.24",         # AST 运行时核心
@@ -758,7 +860,7 @@ agent-core/
 │
 ├── src/
 │   └── agent_core/
-│       ├── __init__.py             # 公开 API: Agent, AgentConfig, AgentResult, AgentMessage
+│       ├── __init__.py             # 公开 API: Agent, AgentConfig, AgentResult, AgentMessage, ModelProvider, ModelId
 │       │
 │       ├── agent.py                # Agent 主类 (run / stream / on_permission_check)
 │       ├── config.py               # AgentConfig pydantic 模型 + 校验
@@ -832,12 +934,15 @@ agent-core/
 │       │   ├── registry.py         # entry_points 发现 + 手动注册
 │       │   └── lifecycle.py        # enable / disable
 │       │
-│       ├── llm/                    # LLM API 集成
+│       ├── llm/                    # LLM 多 Provider 集成
 │       │   ├── __init__.py
-│       │   ├── client.py           # AsyncAnthropic 封装 + 流式
-│       │   ├── models.py           # ClaudeModel 常量枚举
-│       │   ├── normalize.py        # normalize_messages()
-│       │   └── errors.py           # 错误恢复 (rate_limit / overloaded / 断连 / context_length)
+│       │   ├── base.py             # BaseClient 抽象 + get_client() 工厂
+│       │   ├── events.py           # InternalEvent 类型定义
+│       │   ├── normalize.py        # 消息双向规范化 (inbound/outbound)
+│       │   ├── tool_schema.py      # Tool JSON Schema → Provider 原生格式
+│       │   ├── errors.py           # 错误分类 + 统一重试策略
+│       │   ├── anthropic.py        # AnthropicClient (anthropic SDK)
+│       │   └── openai.py           # OpenAIClient (openai SDK)
 │       │
 │       ├── compression/            # 自动压缩
 │       │   ├── __init__.py

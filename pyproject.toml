@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "aiofiles>=24",
     "anthropic>=0.105.2",
+    "openai>=2,<3",
     "charset-normalizer>=3",
     "mcp>=1.0,<2",
     "pydantic>=2.13.4",
@@ -33,4 +34,21 @@ dev = [
 [tool.pytest.ini_options]
 filterwarnings = [
     "ignore:Exception ignored in.*:pytest.PytestUnraisableExceptionWarning",
+]
+markers = [
+    "model: tests for AgentConfig / ClaudeModel / ModelProvider / ModelId",
+    "message: tests for AgentMessage discriminated union and serialization",
+    "agent: tests for Agent class lifecycle (run/stream/permission)",
+    "read: FileReadTool tests (validate_input / call / dedup / encoding)",
+    "write: FileWriteTool tests",
+    "edit: FileEditTool tests (replace / delete / permission / stale detection)",
+    "glob: GlobTool tests",
+    "grep: GrepTool tests (ripgrep dependent, skipped if rg unavailable)",
+    "bash: BashTool tests (echo / failure / timeout / abort / exit code)",
+    "workspace: workspace boundary security tests",
+    "registry: tool registry tests",
+    "attributes: tool class attribute tests (is_read_only / is_destructive)",
+    "slow: tests taking more than 1s (skip with -m 'not slow')",
+    "integration: mock model integration tests (no real API key needed)",
+    "e2e: end-to-end tests requiring real API keys (vcrpy)",
 ]

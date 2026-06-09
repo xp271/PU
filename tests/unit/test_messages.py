@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-from typing import Any
-
 import pydantic
 import pytest
 from pydantic import TypeAdapter
 
-from agent_core.agent import Agent
 from agent_core.models import (
-    AgentConfig,
     AgentMessage,
     AgentResult,
     AssistantText,
-    ClaudeModel,
     DoneMessage,
     ErrorMessage,
     ToolResult,
@@ -20,86 +15,7 @@ from agent_core.models import (
 )
 
 
-class TestClaudeModel:
-    def test_known_values_contains_all_members(self) -> None:
-        values = ClaudeModel.known_values()
-        assert "claude-sonnet-4-5" in values
-        assert "claude-opus-4-7" in values
-        assert "claude-haiku-4-5" in values
-
-    def test_member_value_matches_string(self) -> None:
-        assert ClaudeModel.SONNET_4_5.value == "claude-sonnet-4-5"
-        assert ClaudeModel.OPUS_4_7.value == "claude-opus-4-7"
-        assert ClaudeModel.HAIKU_4_5.value == "claude-haiku-4-5"
-
-
-class TestAgentConfig:
-    def test_default_config_has_expected_values(self) -> None:
-        config = AgentConfig()
-        assert config.model == "claude-sonnet-4-5"
-        assert config.max_turns == 20
-        assert config.permission_mode == "ask"
-        assert config.tools == ["*"]
-        assert config.mcp_servers == {}
-        assert config.skills_dir is None
-        assert config.hooks == []
-        assert config.allow_unknown_model is False
-
-    def test_custom_config_accepts_valid_values(self) -> None:
-        mcp = {"test_server": {"command": "echo", "args": []}}
-        config = AgentConfig(
-            model="claude-haiku-4-5",
-            max_turns=30,
-            permission_mode="bypassPermissions",
-            tools=["Read", "Glob"],
-            mcp_servers=mcp,
-            skills_dir="/tmp/skills",
-        )
-        assert config.model == "claude-haiku-4-5"
-        assert config.max_turns == 30
-        assert config.permission_mode == "bypassPermissions"
-        assert config.tools == ["Read", "Glob"]
-        assert config.mcp_servers == mcp
-        assert config.skills_dir == "/tmp/skills"
-
-    def test_invalid_model_raises_validation_error(self) -> None:
-        with pytest.raises(ValueError, match="Unknown model"):
-            AgentConfig(model="unknown-model-99")
-
-    def test_allow_unknown_model_suppresses_validation_error(self) -> None:
-        with pytest.warns(UserWarning, match="is not a known built-in model"):
-            config = AgentConfig(
-                model="custom-proxy-model-v2",
-                allow_unknown_model=True,
-            )
-        assert config.model == "custom-proxy-model-v2"
-
-    def test_allow_unknown_model_still_requires_explicit_opt_in(self) -> None:
-        with pytest.raises(ValueError, match="Set allow_unknown_model=True"):
-            AgentConfig(model="unlisted-model")
-
-    def test_invalid_permission_mode_raises_validation_error(self) -> None:
-        with pytest.raises(pydantic.ValidationError):
-            AgentConfig(permission_mode="invalid_mode")  # type: ignore[arg-type]
-
-    def test_empty_tools_raises_validation_error(self) -> None:
-        with pytest.raises(ValueError, match="tools list must not be empty"):
-            AgentConfig(tools=[])
-
-    def test_max_turns_zero_raises_validation_error(self) -> None:
-        with pytest.raises(ValueError, match="max_turns must be >= 1"):
-            AgentConfig(max_turns=0)
-
-    def test_max_turns_exceeds_limit_raises_validation_error(self) -> None:
-        with pytest.raises(ValueError, match="max_turns must be <= 500"):
-            AgentConfig(max_turns=501)
-
-    def test_all_permission_modes_accepted(self) -> None:
-        for mode in ("bypassPermissions", "acceptEdits", "ask"):
-            config = AgentConfig(permission_mode=mode)  # type: ignore[arg-type]
-            assert config.permission_mode == mode
-
-
+@pytest.mark.message
 class TestAgentResult:
     def test_end_turn_result(self) -> None:
         result = AgentResult(
@@ -153,6 +69,7 @@ class TestAgentResult:
             )
 
 
+@pytest.mark.message
 class TestAgentMessage:
     def test_assistant_text_message(self) -> None:
         msg: AgentMessage = AssistantText(content="Hello!")
@@ -296,45 +213,3 @@ class TestAgentMessage:
         adapter = TypeAdapter(AgentMessage)
         with pytest.raises(pydantic.ValidationError):
             adapter.validate_python({"type": "unknown_type", "content": "x"})
-
-
-class TestAgent:
-    def test_init_with_default_config(self) -> None:
-        agent = Agent(AgentConfig())
-        assert agent._config.model == "claude-sonnet-4-5"
-
-    def test_init_with_custom_config(self) -> None:
-        config = AgentConfig(model="claude-haiku-4-5", max_turns=5)
-        agent = Agent(config)
-        assert agent._config.model == "claude-haiku-4-5"
-        assert agent._config.max_turns == 5
-
-    @pytest.mark.asyncio
-    async def test_run_raises_not_implemented_error(self) -> None:
-        agent = Agent(AgentConfig())
-        with pytest.raises(NotImplementedError):
-            await agent.run("test prompt")
-
-    @pytest.mark.asyncio
-    async def test_stream_raises_not_implemented_error(self) -> None:
-        agent = Agent(AgentConfig())
-        with pytest.raises(NotImplementedError):
-            async for _ in agent.stream("test prompt"):
-                pass
-
-    @pytest.mark.asyncio
-    async def test_on_permission_check_registers_callback(self) -> None:
-        agent = Agent(AgentConfig())
-
-        called_with: list[tuple[str, dict[str, Any]]] = []
-
-        async def my_callback(tool_name: str, tool_input: dict[str, Any]) -> bool:
-            called_with.append((tool_name, tool_input))
-            return True
-
-        agent.on_permission_check(my_callback)
-        assert agent._permission_callback is my_callback
-
-        result = await agent._permission_callback("Read", {"path": "/tmp/f.txt"})
-        assert result is True
-        assert called_with == [("Read", {"path": "/tmp/f.txt"})]
