@@ -3,6 +3,9 @@ Anthropic Messages streaming-API client.
 
 Translates the Anthropic SDK's event stream into the provider-agnostic
 ``InternalEvent`` stream consumed by the agent query loop.
+
+Self-contained: all Anthropic-specific logic (message conversion, tool
+schemas, stop-reason mapping, error classification) lives here.
 """
 
 from __future__ import annotations
@@ -10,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, ClassVar
 
 import anthropic
 from anthropic.types import (
@@ -21,8 +24,9 @@ from anthropic.types import (
     MessageStopEvent,
 )
 
-from .base import BaseClient
-from .errors import classify_error
+from ..models import ModelProvider
+from .base import BaseClient, register_client
+from .errors import ErrorCategory
 from .events import (
     AssistantText,
     ErrorMessage,
@@ -32,11 +36,31 @@ from .events import (
     TokenCounts,
     ToolUse,
 )
-from .normalize import messages_for_anthropic
+from ..tools.registry import registered_tools
 
 
+# ---------------------------------------------------------------------------
+# Anthropic-specific constants
+# ---------------------------------------------------------------------------
+
+_ANTHROPIC_STOP_MAP: dict[str, str] = {
+    "end_turn": "end_turn",
+    "max_tokens": "max_turns",
+    "stop_sequence": "end_turn",
+    "tool_use": "end_turn",
+}
+
+
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
+
+
+@register_client
 class AnthropicClient(BaseClient):
     """Streaming client backed by the Anthropic Messages API."""
+
+    provider: ClassVar[ModelProvider] = ModelProvider.ANTHROPIC
 
     def __init__(
         self,
@@ -52,6 +76,62 @@ class AnthropicClient(BaseClient):
             kwargs["base_url"] = base_url
         self._client = anthropic.AsyncAnthropic(**kwargs)
 
+    # ------------------------------------------------------------------
+    # Provider-specific class methods
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def convert_messages(
+        cls,
+        messages: list[dict[str, Any]],
+        system: str | None,
+    ) -> tuple[str | None, list[dict[str, Any]]]:
+        """Convert internal messages to Anthropic Messages API parameters."""
+        clean = [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
+        return system, clean
+
+    @classmethod
+    def convert_tools(cls, allowed_tools: list[str]) -> list[dict[str, Any]]:
+        """Generate Anthropic Messages API ``tools`` parameter format."""
+        tools: list[dict[str, Any]] = []
+        for name, tool_cls in registered_tools().items():
+            if "*" not in allowed_tools and name not in allowed_tools:
+                continue
+            tools.append({
+                "name": name,
+                "description": (tool_cls.__doc__ or "").strip(),
+                "input_schema": tool_cls.input_schema(),
+            })
+        return tools
+
+    @classmethod
+    def normalize_stop_reason(cls, raw_reason: str) -> tuple[str, str | None]:
+        """Map an Anthropic stop reason to internal StopReason."""
+        return _ANTHROPIC_STOP_MAP.get(raw_reason, "end_turn"), None
+
+    @classmethod
+    def classify_error(cls, exception: Exception) -> ErrorCategory:
+        """Classify an Anthropic SDK exception."""
+        if not isinstance(exception, anthropic.APIStatusError):
+            return "transient"
+
+        status = exception.status_code
+        if status == 429:
+            return "rate_limit"
+        if status == 529:
+            return "overloaded"
+        if status == 413 or (status == 400 and "context" in str(exception).lower()):
+            return "context_length"
+        if status in (500, 502, 503):
+            return "transient"
+        if status in (401, 403):
+            return "fatal"
+        return "fatal"
+
+    # ------------------------------------------------------------------
+    # Streaming
+    # ------------------------------------------------------------------
+
     async def stream_messages(
         self,
         messages: list[dict[str, Any]],
@@ -60,7 +140,7 @@ class AnthropicClient(BaseClient):
         max_tokens: int = 4096,
         turn_index: int = 0,
     ) -> AsyncGenerator[InternalEvent, None]:
-        system_param, clean_messages = messages_for_anthropic(messages, system)
+        system_param, clean_messages = self.convert_messages(messages, system)
 
         yield StreamStart(
             turn_index=turn_index,
@@ -80,14 +160,13 @@ class AnthropicClient(BaseClient):
                     max_tokens=max_tokens,
                 ):
                     yield event
-                return  # success — stream completed without errors
+                return
             except anthropic.APIStatusError as e:
-                category = classify_error(e, anthropic.Anthropic)
+                category = self.classify_error(e)
                 if category in ("rate_limit", "overloaded", "transient") and attempt < max_retries:
                     delay = min(base_delay * (2 ** attempt), 60)
                     await asyncio.sleep(delay)
                     continue
-                # Fatal or retries exhausted
                 yield ErrorMessage(
                     message=f"LLM error ({e.status_code}): {e.message}",
                     error_type=category,
@@ -95,7 +174,7 @@ class AnthropicClient(BaseClient):
                 yield StopEvent(stop_reason="error", finish_reason_detail=str(e))
                 return
             except Exception as e:
-                category = classify_error(e, anthropic.Anthropic)
+                category = self.classify_error(e)
                 if category in ("rate_limit", "overloaded", "transient") and attempt < max_retries:
                     delay = min(base_delay * (2 ** attempt), 60)
                     await asyncio.sleep(delay)
@@ -125,7 +204,7 @@ class AnthropicClient(BaseClient):
                 match event:
                     case ContentBlockStartEvent():
                         if event.content_block.type == "text":
-                            pass  # text accumulator not needed per-block
+                            pass
                         elif event.content_block.type == "tool_use":
                             current_tool_use = {
                                 "id": event.content_block.id,
@@ -160,7 +239,7 @@ class AnthropicClient(BaseClient):
                             current_tool_use = None
 
                     case MessageDeltaEvent():
-                        pass  # usage info comes via MessageStopEvent
+                        pass
 
                     case MessageStopEvent():
                         usage = stream.current_message_snapshot.usage

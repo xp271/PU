@@ -4,12 +4,14 @@ OpenAI Chat Completions streaming-API client.
 Translates the OpenAI SDK's streaming chunk stream into the provider-agnostic
 ``InternalEvent`` stream consumed by the agent query loop.
 
+Self-contained: all OpenAI-specific logic (message conversion, tool schemas,
+stop-reason mapping, error classification) lives here.
+
 Key differences from Anthropic
 ------------------------------
 - Tool calls are accumulated across chunks via ``index`` keys.
-- ``usage`` arrives in the final chunk (requires ``stream_options={"include_usage": True}``).
-- ``finish_reason`` can signal ``content_filter`` which we map to a
-  ``permission_denied`` stop.
+- ``usage`` arrives in the final chunk (``stream_options={"include_usage": True}``).
+- ``finish_reason`` can signal ``content_filter`` → ``permission_denied`` stop.
 """
 
 from __future__ import annotations
@@ -17,13 +19,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, ClassVar
 
 import openai
-from openai.types.chat import ChatCompletionChunk
 
-from .base import BaseClient
-from .errors import classify_error
+from ..models import ModelProvider
+from .base import BaseClient, register_client
+from .errors import ErrorCategory
 from .events import (
     AssistantText,
     ErrorMessage,
@@ -33,11 +35,31 @@ from .events import (
     TokenCounts,
     ToolUse,
 )
-from .normalize import messages_for_openai
+from ..tools.registry import registered_tools
 
 
+# ---------------------------------------------------------------------------
+# OpenAI-specific constants
+# ---------------------------------------------------------------------------
+
+_OPENAI_STOP_MAP: dict[str, str] = {
+    "stop": "end_turn",
+    "length": "max_turns",
+    "tool_calls": "end_turn",
+    "content_filter": "permission_denied",
+}
+
+
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
+
+
+@register_client
 class OpenAIClient(BaseClient):
     """Streaming client backed by the OpenAI Chat Completions API."""
+
+    provider: ClassVar[ModelProvider] = ModelProvider.OPENAI
 
     def __init__(
         self,
@@ -53,6 +75,135 @@ class OpenAIClient(BaseClient):
             kwargs["base_url"] = base_url
         self._client = openai.AsyncOpenAI(**kwargs)
 
+    # ------------------------------------------------------------------
+    # Provider-specific class methods
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def convert_messages(
+        cls,
+        messages: list[dict[str, Any]],
+        system: str | None,
+    ) -> list[dict[str, Any]]:
+        """Convert internal Anthropic content-block messages to OpenAI format."""
+        openai_messages: list[dict[str, Any]] = []
+
+        if system:
+            openai_messages.append({"role": "system", "content": system})
+
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", [])
+
+            if isinstance(content, str):
+                openai_messages.append({"role": role, "content": content})
+                continue
+
+            if role == "user":
+                text_parts: list[dict[str, Any]] = []
+                tool_results: list[dict[str, Any]] = []
+                for block in content:
+                    if block.get("type") == "tool_result":
+                        tool_results.append(block)
+                    else:
+                        text_parts.append(block)
+
+                if text_parts:
+                    openai_messages.append({
+                        "role": "user",
+                        "content": cls._blocks_to_text(text_parts),
+                    })
+
+                for tr in tool_results:
+                    result_content = tr.get("content", "")
+                    if isinstance(result_content, (list, dict)):
+                        result_content = json.dumps(result_content, ensure_ascii=False)
+                    openai_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tr["tool_use_id"],
+                        "content": str(result_content),
+                    })
+
+            elif role == "assistant":
+                text_content = ""
+                tool_calls: list[dict[str, Any]] = []
+                for block in content:
+                    if block.get("type") == "text":
+                        text_content += block.get("text", "")
+                    elif block.get("type") == "tool_use":
+                        tool_calls.append({
+                            "id": block["id"],
+                            "type": "function",
+                            "function": {
+                                "name": block["name"],
+                                "arguments": json.dumps(block["input"], ensure_ascii=False),
+                            },
+                        })
+
+                msg_out: dict[str, Any] = {"role": "assistant"}
+                msg_out["content"] = text_content or None
+                if tool_calls:
+                    msg_out["tool_calls"] = tool_calls
+                openai_messages.append(msg_out)
+
+            else:
+                openai_messages.append({"role": role, "content": content})
+
+        return openai_messages
+
+    @classmethod
+    def convert_tools(cls, allowed_tools: list[str]) -> list[dict[str, Any]]:
+        """Generate OpenAI Chat Completions API ``tools`` parameter format."""
+        tools: list[dict[str, Any]] = []
+        for name, tool_cls in registered_tools().items():
+            if "*" not in allowed_tools and name not in allowed_tools:
+                continue
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": (tool_cls.__doc__ or "").strip(),
+                    "parameters": tool_cls.input_schema(),
+                },
+            })
+        return tools
+
+    @classmethod
+    def normalize_stop_reason(cls, raw_reason: str) -> tuple[str, str | None]:
+        """Map an OpenAI finish_reason to internal StopReason."""
+        mapped = _OPENAI_STOP_MAP.get(raw_reason, "end_turn")
+        detail = (
+            f"openai finish_reason={raw_reason}"
+            if raw_reason == "content_filter"
+            else None
+        )
+        return mapped, detail
+
+    @classmethod
+    def classify_error(cls, exception: Exception) -> ErrorCategory:
+        """Classify an OpenAI SDK exception."""
+        if not isinstance(exception, openai.APIStatusError):
+            return "transient"
+
+        status = exception.status_code
+        if status == 429:
+            return "rate_limit"
+        if status == 503:
+            return "overloaded"
+        if status in (500, 502):
+            return "transient"
+        if status == 413 or (status == 400 and "context" in str(exception).lower()):
+            return "context_length"
+        if status == 400 and "content_filter" in str(exception).lower():
+            return "content_filter"
+        if status in (401, 403):
+            return "fatal"
+        return "fatal"
+
+    # ------------------------------------------------------------------
+    # Streaming
+    # ------------------------------------------------------------------
+
     async def stream_messages(
         self,
         messages: list[dict[str, Any]],
@@ -61,7 +212,7 @@ class OpenAIClient(BaseClient):
         max_tokens: int = 4096,
         turn_index: int = 0,
     ) -> AsyncGenerator[InternalEvent, None]:
-        openai_messages = messages_for_openai(messages, system)
+        openai_messages = self.convert_messages(messages, system)
 
         yield StreamStart(
             turn_index=turn_index,
@@ -80,9 +231,9 @@ class OpenAIClient(BaseClient):
                     max_tokens=max_tokens,
                 ):
                     yield event
-                return  # success
+                return
             except openai.APIStatusError as e:
-                category = classify_error(e, openai.OpenAI)
+                category = self.classify_error(e)
                 if category in ("rate_limit", "overloaded", "transient") and attempt < max_retries:
                     delay = min(base_delay * (2 ** attempt), 60)
                     await asyncio.sleep(delay)
@@ -94,7 +245,7 @@ class OpenAIClient(BaseClient):
                 yield StopEvent(stop_reason="error", finish_reason_detail=str(e))
                 return
             except Exception as e:
-                category = classify_error(e, openai.OpenAI)
+                category = self.classify_error(e)
                 if category in ("rate_limit", "overloaded", "transient") and attempt < max_retries:
                     delay = min(base_delay * (2 ** attempt), 60)
                     await asyncio.sleep(delay)
@@ -124,11 +275,9 @@ class OpenAIClient(BaseClient):
         final_finish_reason: str | None = None
 
         async for chunk in stream:
-            # Collect usage (OpenAI sends it in the final chunk)
             if chunk.usage:
                 final_usage = chunk.usage
 
-            # Collect finish_reason
             if chunk.choices and chunk.choices[0].finish_reason:
                 final_finish_reason = chunk.choices[0].finish_reason
 
@@ -137,11 +286,9 @@ class OpenAIClient(BaseClient):
 
             delta = chunk.choices[0].delta
 
-            # Text delta
             if delta.content:
                 yield AssistantText(content=delta.content)
 
-            # Tool call deltas (accumulate by index)
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
                     idx = tc_delta.index
@@ -159,7 +306,6 @@ class OpenAIClient(BaseClient):
                     if tc_delta.function and tc_delta.function.arguments:
                         tc["arguments"] += tc_delta.function.arguments
 
-        # Yield accumulated tool calls in index order
         for idx in sorted(current_tool_calls):
             tc = current_tool_calls[idx]
             try:
@@ -172,14 +318,12 @@ class OpenAIClient(BaseClient):
                 tool_input=input_dict,
             )
 
-        # Token counts
         if final_usage:
             yield TokenCounts(
                 input_tokens=final_usage.prompt_tokens,
                 output_tokens=final_usage.completion_tokens,
             )
 
-        # Stop event
         yield StopEvent(
             stop_reason=final_finish_reason or "stop",
             finish_reason_detail=(
@@ -188,3 +332,16 @@ class OpenAIClient(BaseClient):
                 else None
             ),
         )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _blocks_to_text(blocks: list[dict[str, Any]]) -> str:
+        """Convert Anthropic content blocks to a single OpenAI text string."""
+        parts: list[str] = []
+        for block in blocks:
+            if block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "\n".join(parts)

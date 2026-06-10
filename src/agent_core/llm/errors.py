@@ -1,16 +1,13 @@
 """
-Per-provider error classification and tenacity retry-configuration factory.
+Shared error types and retry-configuration utilities.
 
-The query() loop catches provider SDK exceptions and routes them through
-``classify_error()`` to decide whether to retry (rate_limit / overloaded /
-transient) or abort (context_length / content_filter / fatal).
+Per-provider error classification has moved into each ``BaseClient``
+subclass's ``classify_error()`` class method.
 """
 
 from __future__ import annotations
 
 from typing import Literal
-
-from ..models import ModelProvider
 
 
 # ---------------------------------------------------------------------------
@@ -28,78 +25,29 @@ ErrorCategory = Literal[
 
 
 # ---------------------------------------------------------------------------
-# Per-provider classification
-# ---------------------------------------------------------------------------
-
-def classify_error(exception: Exception, provider: ModelProvider) -> ErrorCategory:
-    """Classify a provider SDK exception into one of the six error categories."""
-    if provider == ModelProvider.ANTHROPIC:
-        from anthropic import APIStatusError
-
-        if not isinstance(exception, APIStatusError):
-            return "transient"
-
-        status = exception.status_code
-        if status == 429:
-            return "rate_limit"
-        if status == 529:
-            return "overloaded"
-        if status == 413 or (status == 400 and "context" in str(exception).lower()):
-            return "context_length"
-        if status in (500, 502, 503):
-            return "transient"
-        if status in (401, 403):
-            return "fatal"
-        return "fatal"
-
-    if provider == ModelProvider.OPENAI:
-        from openai import APIStatusError
-
-        if not isinstance(exception, APIStatusError):
-            return "transient"
-
-        status = exception.status_code
-        if status == 429:
-            return "rate_limit"
-        if status == 503:
-            return "overloaded"
-        if status in (500, 502):
-            return "transient"
-        if status == 413 or (status == 400 and "context" in str(exception).lower()):
-            return "context_length"
-        if status == 400 and "content_filter" in str(exception).lower():
-            return "content_filter"
-        if status in (401, 403):
-            return "fatal"
-        return "fatal"
-
-    return "fatal"
-
-
-# ---------------------------------------------------------------------------
 # Tenacity retry-config factory
 # ---------------------------------------------------------------------------
 
-def _retry_predicate(provider_str: str):
-    """Build a tenacity ``retry`` predicate that only retries on recoverable errors."""
-    provider = ModelProvider(provider_str)
+def _retry_predicate(classify_error_fn, provider_str: str):
+    """Build a tenacity ``retry`` predicate that uses a provider-specific
+    ``classify_error`` callable."""
 
     def _should_retry(exception: Exception) -> bool:
-        category = classify_error(exception, provider)
+        category = classify_error_fn(exception)
         return category in ("rate_limit", "overloaded", "transient")
 
     return _should_retry
 
 
-def retry_config_for(provider: str) -> dict:
+def retry_config_for(classify_error_fn, provider: str) -> dict:
     """Return kwargs suitable for ``tenacity.retry(**kwargs)``.
 
-    The returned dict is differentiated by provider but currently uses the
-    same sensible defaults across all providers (exponential back-off 4→60 s,
-    max 3 attempts).
+    *classify_error_fn* is the provider's ``BaseClient.classify_error`` class
+    method.  The returned dict uses exponential back-off 4→60 s, max 3
+    attempts.
     """
     return {
-        "retry": _retry_predicate(provider),
+        "retry": _retry_predicate(classify_error_fn, provider),
         "wait": "wait_exponential(multiplier=1, min=4, max=60)",
         "stop": "stop_after_attempt(3)",
         "reraise": True,

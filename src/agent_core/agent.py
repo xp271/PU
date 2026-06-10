@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
@@ -15,6 +16,7 @@ class Agent:
     def __init__(self, config: AgentConfig) -> None:
         self._config = config
         self._permission_callback: PermissionCallback | None = None
+        self._trace_id = uuid.uuid4().hex
 
     def on_permission_check(self, callback: PermissionCallback) -> None:
         self._permission_callback = callback

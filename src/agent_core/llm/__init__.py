@@ -1,8 +1,6 @@
-from .base import BaseClient, get_client
+from .base import BaseClient, get_client, register_client
+from .errors import ErrorCategory, retry_config_for
 from .events import InternalEvent, StopEvent, StreamStart, TokenCounts
-from .errors import ErrorCategory, classify_error, retry_config_for
-from .normalize import normalize_stop_reason
-from .tool_schema import tools_for_anthropic, tools_for_openai
 
 __all__ = [
     "BaseClient",
@@ -11,10 +9,7 @@ __all__ = [
     "StopEvent",
     "StreamStart",
     "TokenCounts",
-    "classify_error",
     "get_client",
-    "normalize_stop_reason",
+    "register_client",
     "retry_config_for",
-    "tools_for_anthropic",
-    "tools_for_openai",
 ]

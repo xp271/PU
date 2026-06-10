@@ -499,66 +499,242 @@ InternalEvent = Annotated[
 ]
 ```
 
-- [ ] **0. ModelProvider / ModelId** (`models.py`)：
-  - `ModelProvider` 枚举（ANTHROPIC / OPENAI）
-  - `ModelId` frozen dataclass（provider + name），`__str__` 输出 `"provider/name"`
-  - `ModelId.parse(raw: str)`：`"provider/model"` 格式解析；省略 provider 时默认 `anthropic`（向后兼容 `"claude-sonnet-4-5"`）
-  - `ModelProvider.known_models()` 返回 `{ModelProvider: [模型名列表]}`，`ModelId.known_values()` 返回所有合法 `"provider/model"` 字符串
+#### 3.1 ModelProvider / ModelId (`models.py`)
 
-- [ ] **1. BaseClient 抽象** (`llm/base.py`)：
-  - 抽象方法 `stream_messages(messages, tools, system, model) -> AsyncGenerator[InternalEvent]`
-  - 工厂函数 `get_client(model_id: ModelId, config: AgentConfig) -> BaseClient` 按 provider 路由
-  - Client 生命周期：构造 → `stream_messages()` → 销毁（无状态，每次调用独立）
+**`ModelProvider` 枚举**
 
-- [ ] **2. 消息规范化** (`llm/normalize.py`)：
-  - 提供两个方向：
-    - **入站（inbound）**：Provider 的流式 chunk → `InternalEvent`（TextDelta → AssistantText, tool_use → ToolUse, usage → TokenCounts, stop → StopEvent）
-    - **出站（outbound）**：内部消息列表 → Provider 原生 API 格式（messages 列表 + system prompt + tools schema）
-  - 统一处理 tool_use / tool_result 配对校验
-  - 内部存储格式采用 Anthropic content-block 结构（更丰富），非 Anthropic provider 在出站时转换
-  - OpenAI 特有处理：`role: "tool"` ↔ content block `tool_result` 双向映射
+```python
+class ModelProvider(str, Enum):
+    ANTHROPIC = "anthropic"
+    OPENAI = "openai"
 
-- [ ] **3. AnthropicClient** (`llm/anthropic.py`)：
-  - 封装 `AsyncAnthropic`，支持 api_key / base_url 配置注入
-  - 流式响应完整事件解析：content_block_start / delta / stop，message_start / delta / stop
-  - 特性：prompt caching 显式标记（provider-specific feature，其他 provider 忽略）
-  - 错误恢复：
-    - `max_output_tokens` → 自动截断 + continue（最多 3 次）
-    - `rate_limit` → tenacity 指数退避，Retry-After header 优先
-    - `overloaded` (529) → 指数退避（区别于 rate_limit）
-    - `context_length_exceeded` → 不可恢复异常
-    - 流式中途断连 → 重连 + stop_reason=null continue
+    @classmethod
+    def known_providers(cls) -> set[str]: ...
 
-- [ ] **4. OpenAIClient** (`llm/openai.py`)：
-  - 封装 `AsyncOpenAI`，支持 api_key / base_url 配置注入
-  - 流式 Responses API / Chat Completions API（优先 Chat Completions，范围更广）
-  - 功能映射：
-    - tool_calls delta → ToolUse 事件（含 index 聚合）
-    - usage chunk → TokenCounts 事件
-    - finish_reason → StopEvent（含内容过滤检测）
-  - 错误恢复：
-    - `max_tokens` → 自动截断 + continue（最多 3 次）
-    - `rate_limit` (429) → tenacity 指数退避，Retry-After header 优先
-    - `server_error` (500/502/503) → 指数退避
-    - `context_length_exceeded` → 不可恢复异常
-    - `content_filter` → yield ErrorMessage + StopEvent(stop_reason="content_filtered")
+    @classmethod
+    def known_models(cls) -> dict["ModelProvider", list[str]]:
+        """返回每个 provider 的已知模型名列表。"""
+```
 
-- [ ] **5. Tool schema 转换** (`llm/tool_schema.py`)：
-  - 从 Tool 注册表提取所有工具的 `input_schema()` JSON Schema
-  - Anthropic 格式：`{name, description, input_schema}` 列表
-  - OpenAI 格式：`{type: "function", function: {name, description, parameters}}` 列表
-  - Provider 无关的内部工具描述格式 → Provider 原生格式转换
+**`ModelId` frozen dataclass**
 
-- [ ] **6. 错误恢复统一** (`llm/errors.py`)：
-  - per-provider 错误分类器：`classify_error(exception, provider) -> ErrorCategory`
-  - `ErrorCategory = Literal["rate_limit", "overloaded", "context_length", "content_filter", "transient", "fatal"]`
-  - 统一重试策略工厂：按 ErrorCategory + provider 返回 tenacity retry config
-  - 不可恢复错误统一抛出 `FatalLLMError(reason, provider, model)`
+```python
+@dataclass(frozen=True, order=True)
+class ModelId:
+    provider: ModelProvider
+    name: str                           # 例: "claude-sonnet-4-5", "gpt-4o"
 
-- [ ] **7. 结构化日志** (`logging/tracer.py`)：
-  - 每个 turn 记录：`turn_index / provider / model / input_tokens / output_tokens / cache_read_tokens(Anthropic) / tool_uses / latency_ms / error_category`
-  - 统一 `trace_id`（uuid4）贯穿整个 Agent 生命周期
-  - 使用 Python `logging`，provider 相关的可选字段（cache_read_tokens 等）仅在适用时记录
+    def __str__(self) -> str:           # "anthropic/claude-sonnet-4-5"
+        return f"{self.provider.value}/{self.name}"
+
+    @classmethod
+    def parse(cls, raw: str) -> "ModelId":
+        """支持:
+          "anthropic/claude-sonnet-4-5"  → ModelId(ANTHROPIC, "claude-sonnet-4-5")
+          "openai/gpt-4o"                → ModelId(OPENAI, "gpt-4o")
+          "claude-sonnet-4-5"            → ModelId(ANTHROPIC, "claude-sonnet-4-5")  # 向后兼容
+        """
+
+    @classmethod
+    def known_values(cls) -> set[str]:  # 所有合法 "provider/model" 字符串
+```
+
+**`AgentConfig` 多 Provider 字段**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_keys` | `dict[str, str]` | `{}` | Provider → API Key 映射（缺省从环境变量读取：`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`） |
+| `base_urls` | `dict[str, str]` | `{}` | Provider → 自定义 base URL（代理/自托管场景） |
+
+**辅助属性/方法**：
+- `AgentConfig.model_id` property → `ModelId`：解析 `model` 字符串为结构化标识
+- `AgentConfig.get_api_key(provider)` → `str | None`：优先 `api_keys` 字典 → 环境变量 Fallback
+- `AgentConfig.get_base_url(provider)` → `str | None`：仅替换同 provider 的默认端点
+
+`validate_model` 逻辑已从 `ClaudeModel.known_values()` 升级为 `ModelId.parse()` + `ModelId.known_values()`，同时保留 `allow_unknown_model` 机制。
+
+---
+
+#### 3.2 BaseClient 抽象 + Provider 注册表 (`llm/base.py`)
+
+每个 Provider 实现 **一个自包含的 `.py` 文件**，继承 `BaseClient` 并覆盖 4 个 classmethod + 1 个 instance method。通过注册模式自动路由，无需硬编码 match/case。
+
+```python
+class BaseClient(ABC):
+    def __init__(self, model: str, api_key: str | None, base_url: str | None): ...
+
+    # -- classmethod（Provider 覆盖，静态工具方法）--
+
+    @classmethod
+    def convert_messages(cls, messages: list[dict], system: str | None) -> Any:
+        """内部 Anthropic content-block 格式 → Provider 原生 API 格式"""
+
+    @classmethod
+    def convert_tools(cls, allowed_tools: list[str]) -> list[dict]:
+        """从 Tool 注册表提取 schema → Provider 原生 tools 参数"""
+
+    @classmethod
+    def normalize_stop_reason(cls, raw_reason: str) -> tuple[str, str | None]:
+        """Provider raw stop reason → (internal StopReason, error_detail)"""
+
+    @classmethod
+    def classify_error(cls, exception: Exception) -> ErrorCategory:
+        """Provider SDK 异常 → 统一 ErrorCategory"""
+
+    # -- instance method（异步流式调用）--
+
+    @abstractmethod
+    async def stream_messages(
+        self, messages: list[dict], tools: list[dict],
+        system: str | None = None, max_tokens: int = 4096,
+        turn_index: int = 0,
+    ) -> AsyncGenerator[InternalEvent, None]: ...
+```
+
+**注册表 + 装饰器工厂**
+
+```python
+# 全局注册表：{ModelProvider: Type[BaseClient]}
+_PROVIDER_CLIENTS: dict[ModelProvider, type[BaseClient]] = {}
+
+def register_client(cls: type[BaseClient]) -> type[BaseClient]:
+    """装饰器，读取 cls.provider ClassVar 作为注册 key。
+    与 @register_tool 使用完全一致的注册模式。"""
+
+def get_client(model_id: ModelId, config: AgentConfig) -> BaseClient:
+    """从注册表查找并实例化。无需硬编码分支。"""
+```
+
+**设计要点**：
+- `@register_client` 装饰器读取 `cls.provider` 自动注册，与 Tool 系统的 `@register_tool` 模式统一
+- 新增 Provider 无需修改此文件——装饰器在 import 时自动完成注册
+- `convert_messages` / `convert_tools` / `normalize_stop_reason` / `classify_error` 作为 **classmethod** 定义，无需实例化即可调用（例如 `query()` 在创建 client 前获取 tool schema）
+- 原计划的 `normalize.py` 和 `tool_schema.py` 已**删除**——其内容按 Provider 内聚到各自的 `anthropic.py` / `openai.py` 中。
+
+---
+
+#### 3.3 内部事件流 (`llm/events.py`)
+
+```
+StreamStart → AssistantText* → (ToolUse)* → TokenCounts → StopEvent
+```
+
+| 事件类型 | 字段 | 说明 |
+|----------|------|------|
+| `StreamStart` | `turn_index`, `provider`, `model` | 流开始元信息，供 tracer 使用 |
+| `TokenCounts` | `input_tokens`, `output_tokens`, `cache_read_tokens?`, `cache_write_tokens?` | 每 turn 的 token 统计（内部事件，不暴露给调用方） |
+| `StopEvent` | `stop_reason`, `finish_reason_detail?` | 流终止信号（Provider 原始 stop reason，由 query() 映射为 StopReason） |
+
+`InternalEvent` discriminated union：`StreamStart | AssistantText | ToolUse | TokenCounts | StopEvent | ErrorMessage`
+
+---
+
+#### 3.4 AnthropicClient (`llm/anthropic.py`)
+
+**自包含**：所有 Anthropic 专属逻辑（消息转换、工具 schema、stop 映射、错误分类、流式解析）集中在此文件。
+
+| 方法 | 说明 |
+|------|------|
+| `convert_messages()` | 内部格式 → Anthropic Messages API 参数。近乎恒等变换（内部格式即 Anthropic content-block），仅剥离 `_` 前缀的内部元数据字段，返回 `(system, messages)` 元组。 |
+| `convert_tools()` | `registry → [{name, description, input_schema}]`，Anthropic 原生格式 |
+| `normalize_stop_reason()` | `{"end_turn"→"end_turn", "max_tokens"→"max_turns", "stop_sequence"→"end_turn", "tool_use"→"end_turn"}` |
+| `classify_error()` | HTTP status code 驱动：429→rate_limit, 529→overloaded, 413/context→context_length, 5xx→transient, 401/403→fatal |
+| `stream_messages()` | 封装 `AsyncAnthropic.messages.stream()` → 解析 ContentBlockStart/Delta/Stop, MessageStop → yield InternalEvent |
+| 重试逻辑 | 内联手动重试循环（rate_limit/overloaded/transient 退避，3 次上限），不依赖 tenacity decorator |
+| Prompt caching | `cache_read_input_tokens` / `cache_creation_input_tokens` 通过 `TokenCounts` 传递 |
+
+通过 `@register_client` 装饰器 + `provider: ClassVar[ModelProvider] = ModelProvider.ANTHROPIC` 自动注册，与 Tool 系统的 `@register_tool` 模式统一。
+
+---
+
+#### 3.5 OpenAIClient (`llm/openai.py`)
+
+**自包含**：所有 OpenAI 专属逻辑集中在此文件。
+
+| 方法 | 说明 |
+|------|------|
+| `convert_messages()` | 内部 Anthropic content-block → OpenAI Chat Completions 格式。转换规则：system→首条 system message；user 中的 tool_result block→独立 `role:"tool"` message；assistant 中的 tool_use block→`tool_calls` 数组；空 text → `content=None`。 |
+| `convert_tools()` | `registry → [{type:"function", function:{name, description, parameters}}]`，OpenAI 原生格式 |
+| `normalize_stop_reason()` | `{"stop"→"end_turn", "length"→"max_turns", "tool_calls"→"end_turn", "content_filter"→"permission_denied"}` |
+| `classify_error()` | 429→rate_limit, 503→overloaded, 500/502→transient, 413/context→context_length, content_filter→content_filter, 401/403→fatal |
+| `stream_messages()` | 封装 `AsyncOpenAI.chat.completions.create(stream=True)` → 解析 ChatCompletionChunk delta（含 index 聚合 tool_calls）→ yield InternalEvent |
+| 特性 | `stream_options={"include_usage": True}` 获取 token 统计；tool_calls 按 index 跨 chunk 累积后在流结束后一次性产出 |
+| 重试逻辑 | 同 AnthropicClient，内联手动指数退避 |
+
+通过 `@register_client` 装饰器 + `provider: ClassVar[ModelProvider] = ModelProvider.OPENAI` 自动注册。
+
+---
+
+#### 3.6 错误分类 + 重试配置 (`llm/errors.py`)
+
+```python
+ErrorCategory = Literal[
+    "rate_limit",       # 429 → 指数退避重试
+    "overloaded",       # 529 (Anthropic) / 503 (OpenAI) → 指数退避重试
+    "context_length",   # context_window_exceeded → 不可恢复
+    "content_filter",   # 内容过滤 (OpenAI content_filter)
+    "transient",        # 500/502/网络错误 → 指数退避重试
+    "fatal",            # 认证/参数错误 → 不可恢复
+]
+
+def retry_config_for(classify_error_fn, provider: str) -> dict:
+    """返回 tenacity.retry(**kwargs) 参数。
+    classify_error_fn 为 BaseClient.classify_error 方法。"""
+```
+
+`classify_error()` 逻辑已分散到各 Provider 的 classmethod 中——每个 SDK 的异常类型和 status code 语义不同，内聚到 Provider 文件更自然。
+
+---
+
+#### 3.7 新增 Provider 的流程
+
+1. 在 `models.py` 的 `ModelProvider` 枚举中添加成员，`known_models()` 中添加模型列表
+2. 创建 `llm/<provider>.py`：
+   - 用 `@register_client` 装饰器 + `provider: ClassVar[ModelProvider]` 声明注册
+   - 实现 4 个 classmethod + `stream_messages()`
+
+不再需要修改 `base.py`、`errors.py` 或 `__init__.py`。
+
+---
+
+#### 3.8 结构化日志 (`logging/tracer.py`)
+
+**`TurnTracer`** — 透明的 `InternalEvent` 流包装器，收集 turn 级指标并通过 Python `logging` 模块输出结构化记录。
+
+```python
+from agent_core.logging import TurnTracer
+
+# query() 中的用法：
+tracer = TurnTracer(trace_id=self._trace_id)
+async for event in tracer.wrap(client.stream_messages(messages, tools)):
+    # event 透明透传，tracer 已在后台收集指标
+    match event: ...
+```
+
+**设计要点**：
+- `TurnTracer.wrap()` 接收 `AsyncGenerator[InternalEvent, None]`，**透明地 re-yield 每个事件**，同时通过 `match/case` 从事件中收集字段
+- 流结束（`StopEvent` 或生成器异常退出）时，通过 `logging.getLogger("agent_core.turn").info()` 输出一条结构化日志
+- `trace_id` 由 `Agent.__init__()` 生成（`uuid4`），存储在 `self._trace_id`
+
+**日志字段**：
+
+| Field | Source | 说明 |
+|-------|--------|------|
+| `trace_id` | `TurnTracer.__init__` | uuid4，贯穿 Agent 生命周期 |
+| `turn_index` | `StreamStart.turn_index` | |
+| `provider` | `StreamStart.provider` | |
+| `model` | `StreamStart.model` | |
+| `status` | 推断 | `"success"` / `"error"` |
+| `input_tokens` | `TokenCounts.input_tokens` | |
+| `output_tokens` | `TokenCounts.output_tokens` | |
+| `cache_read_tokens` | `TokenCounts.cache_read_tokens` | Anthropic 专用，None 时不输出 |
+| `cache_write_tokens` | `TokenCounts.cache_write_tokens` | Anthropic 专用，None 时不输出 |
+| `tool_uses` | `ToolUse` 计数 | 本轮工具调用次数 |
+| `tool_names` | `ToolUse.tool_name` 去重排序列表 | |
+| `latency_ms` | `StreamStart` → `StopEvent` 时间差 | `time.monotonic()` 计时 |
+| `error_type` | `ErrorMessage.error_type` | 仅 error 时出现 |
+
+**不包含**：日志持久化（用户自行配置 logging handler）、per-tool 子日志、异步 I/O。
 
 ---
 
