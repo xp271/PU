@@ -182,9 +182,13 @@ async def _repl(config: AgentConfig) -> None:
                 elif msg.type == "tool_use":
                     print(f"\n[{msg.tool_name}] {_summarise(msg.tool_input)}")
                 elif msg.type == "tool_result":
-                    status = "ERR" if msg.is_error else "OK"
-                    preview = _ellipsis(str(msg.content), 120)
-                    print(f"  -> {status}: {preview}")
+                    if msg.is_error:
+                        # 错误结果完整展示，方便定位问题
+                        preview = _ellipsis(str(msg.content), 500)
+                        print(f"  -> ERR: {preview}")
+                    else:
+                        preview = _ellipsis(str(msg.content), 120)
+                        print(f"  -> OK: {preview}")
                 elif msg.type == "error":
                     print(f"\n[ERROR] {msg.message}")
                 elif msg.type == "done":

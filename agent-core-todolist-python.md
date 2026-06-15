@@ -18,8 +18,13 @@
 ```
 src/agent_core/
 ├── __init__.py          # 公开 API 导出
+├── __main__.py          # python -m agent_core 入口
 ├── agent.py             # Agent 主类
+├── cli.py               # 交互式 REPL 测试入口
 ├── models.py            # 所有 Pydantic 数据模型
+├── llm/                 # LLM 多 Provider 集成（详见第 3 节）
+├── query/               # Agent 主循环（详见第 4 节）
+├── logging/             # 结构化日志
 └── tools/               # 工具系统（详见第 2 节）
 ```
 
@@ -112,7 +117,7 @@ PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
 | `mcp_servers` | `dict[str, Any]` | `{}` | MCP 服务端配置，键为服务名。 |
 | `skills_dir` | `str \| None` | `None` | Skill 定义文件目录路径。 |
 | `hooks` | `list[Any]` | `[]` | Agent 启动时注册的 Hook 实例。 |
-| `api_keys` | `dict[str, str]` | `{}` | Provider → API Key 映射（如 `{"openai": "sk-..."}`）。缺省时从环境变量读取（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 等）。 |
+| `api_keys` | `dict[str, str]` | `{}` | Provider → API Key 映射（如 `{"deepseek": "sk-..."}`）。缺省时从环境变量读取（`ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`、`OPENAI_API_KEY` 等）。 |
 | `base_urls` | `dict[str, str]` | `{}` | Provider → 自定义 base URL（代理、自托管场景）。仅替换同 provider 的默认 API 端点。 |
 | `allow_unknown_model` | `bool` | `False` | 为 `True` 时允许使用已知 provider 列表之外的模型标识（如代理/自托管/兼容 API 场景）。 |
 
@@ -121,6 +126,7 @@ PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
 ```python
 class ModelProvider(str, Enum):
     ANTHROPIC = "anthropic"
+    DEEPSEEK = "deepseek"
     OPENAI = "openai"
 ```
 
@@ -140,7 +146,7 @@ class ModelId:
         """'provider/model' 格式解析；省略 provider 时默认 anthropic（向后兼容）。"""
 ```
 
-`ModelProvider.known_models()` 返回 `{provider: [模型名列表]}`，`known_providers()` 返回 provider 枚举成员集合，`ModelId.known_values()` 返回所有合法 `"provider/model"` 字符串的集合。
+`ModelProvider.known_models()` 返回 `{provider: [模型名列表]}`（Anthropic: claude-sonnet-4-5/opus-4-7/haiku-4-5；DeepSeek: deepseek-v4-pro/v4-flash；OpenAI: gpt-4o/4.1/4.1-mini/o4-mini），`known_providers()` 返回 provider 枚举成员集合，`ModelId.known_values()` 返回所有合法 `"provider/model"` 字符串的集合。
 
 #### 1.5 运行结果 `AgentResult`
 
@@ -459,7 +465,7 @@ class BashInput(BaseModel):
 
 ### 3. LLM 多 Provider 集成层 & 结构化日志 (3 天)
 
-**功能**: Provider-agnostic LLM 客户端抽象，Anthropic + OpenAI 首批实现，消息双向规范化，流式响应，内部规范事件流，全错误类型恢复，turn-level 结构化日志。
+**功能**: Provider-agnostic LLM 客户端抽象，Anthropic + OpenAI + DeepSeek 三 provider 实现，消息双向规范化，流式响应，内部规范事件流，全错误类型恢复，turn-level 结构化日志。
 
 **原因**: Agent 主循环的唯一外部依赖就是 LLM API，必须在集成层就支持多 provider。采用 Protocol ABC 模式，每个 provider 的细节隔离在各自实现中，内部统一使用 `AgentMessage` discriminated union 衍生的事件流。详案见 `agent-core-llm-multi-provider-plan.md`。
 
@@ -474,14 +480,14 @@ class BashInput(BaseModel):
                     ┌──────────▼───────────────┐
                     │    BaseClient (ABC)      │
                     │    stream_messages()     │
-                    └────┬──────────────┬──────┘
-                         │              │
-              ┌──────────▼──┐  ┌────────▼──────┐
-              │Anthropic    │  │OpenAI         │
-              │Client       │  │Client         │
-              │(anthropic   │  │(openai SDK)   │
-              │ SDK)        │  │               │
-              └─────────────┘  └───────────────┘
+                    └────┬──────────┬────┬─────┘
+                         │          │    │
+              ┌──────────▼──┐ ┌─────▼──┐┌▼──────────┐
+              │Anthropic    │ │OpenAI  ││DeepSeek   │
+              │Client       │ │Client  ││Client     │
+              │(anthropic   │ │(openai ││(openai    │
+              │ SDK)        │ │ SDK)   ││ SDK)      │
+              └─────────────┘ └────────┘└───────────┘
 ```
 
 **内部规范事件 `InternalEvent`** — 在 `AgentMessage` 基础上扩充内部用类型：
@@ -506,6 +512,7 @@ InternalEvent = Annotated[
 ```python
 class ModelProvider(str, Enum):
     ANTHROPIC = "anthropic"
+    DEEPSEEK = "deepseek"
     OPENAI = "openai"
 
     @classmethod
@@ -543,7 +550,7 @@ class ModelId:
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `api_keys` | `dict[str, str]` | `{}` | Provider → API Key 映射（缺省从环境变量读取：`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`） |
+| `api_keys` | `dict[str, str]` | `{}` | Provider → API Key 映射（缺省从环境变量读取：`ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`） |
 | `base_urls` | `dict[str, str]` | `{}` | Provider → 自定义 base URL（代理/自托管场景） |
 
 **辅助属性/方法**：
@@ -665,6 +672,24 @@ StreamStart → AssistantText* → (ToolUse)* → TokenCounts → StopEvent
 
 ---
 
+#### 3.5.5 DeepSeekClient (`llm/deepseek.py`)
+
+**自包含**：所有 DeepSeek 专属逻辑集中在此文件。DeepSeek API 完全兼容 OpenAI 格式，因此复用 `openai` SDK。
+
+| 方法 | 说明 |
+|------|------|
+| `__init__()` | 默认 `base_url="https://api.deepseek.com"`（用户指定时覆盖） |
+| `convert_messages()` | 与 OpenAI 相同（API 格式兼容） |
+| `convert_tools()` | 与 OpenAI 相同 |
+| `normalize_stop_reason()` | `{"stop"→"end_turn", "length"→"max_turns", "tool_calls"→"end_turn", "content_filter"→"permission_denied"}` |
+| `classify_error()` | 429→rate_limit, 503→overloaded, 500/502→transient, **402→fatal**（余额不足，不可重试）, 413/context→context_length, content_filter→content_filter, 401/403→fatal |
+| `stream_messages()` | 与 OpenAI 相同结构，`StreamStart.provider="deepseek"` |
+| 重试逻辑 | 同 AnthropicClient/OpenAIClient，内联手动指数退避 |
+
+通过 `@register_client` 装饰器 + `provider: ClassVar[ModelProvider] = ModelProvider.DEEPSEEK` 自动注册。
+
+---
+
 #### 3.6 错误分类 + 重试配置 (`llm/errors.py`)
 
 ```python
@@ -688,12 +713,13 @@ def retry_config_for(classify_error_fn, provider: str) -> dict:
 
 #### 3.7 新增 Provider 的流程
 
-1. 在 `models.py` 的 `ModelProvider` 枚举中添加成员，`known_models()` 中添加模型列表
+1. 在 `models.py` 的 `ModelProvider` 枚举中添加成员，`known_models()` 中添加模型列表，`get_api_key()` 中添加环境变量映射
 2. 创建 `llm/<provider>.py`：
    - 用 `@register_client` 装饰器 + `provider: ClassVar[ModelProvider]` 声明注册
    - 实现 4 个 classmethod + `stream_messages()`
-
-不再需要修改 `base.py`、`errors.py` 或 `__init__.py`。
+3. 在 `llm/__init__.py` 中添加 `from . import <provider>` 触发注册
+4. 在 `query/budget.py` 中添加该 provider 模型的上下文窗口大小
+5. （可选）在 `cli.py` 的 `_ENV_VAR_MAP` 中添加环境变量映射
 
 ---
 
@@ -738,30 +764,319 @@ async for event in tracer.wrap(client.stream_messages(messages, tools)):
 
 ---
 
-## Phase 2: Agent 核心循环 (Week 3-4)
+## Phase 2: Agent 核心循环 — 已实现
 
-### 4. Agent 主循环 (query 系统) (4 天)
+> 以下 #4 已全部实现，#5 及之后为后续任务。
 
-**功能**: `query()` 异步生成器，完整 turn 循环，token 预算管理，上下文硬截断，Stop hooks 集成。**不含自动压缩**（自动压缩拆为独立条目 5.5）。
+---
 
-**原因**: 这是整个 Agent 的心脏。自动压缩是个独立且复杂的子系统（摘要质量、保留哪些 tool_result、压缩后能否恢复），绑在主循环里会引爆首次集成风险。先做硬截断 + 预算检查跑通主循环，压缩单独迭代。
+### 4. Agent 主循环 (query 系统)
 
-- [ ] `query()` 异步生成器签名与骨架
-- [ ] Turn 循环核心：
-  - 上下文富化（git status 子进程, 当前日期, AGENTS.md 文件读取, 工作区文件列表）
-  - 发送 LLM 请求 → 流式接收 assistant message
-  - 检测 tool_use 块 → 分发到 `run_tools()` 工具管线
-  - tool_result 回填为 user message（tool_result content block）
-  - 检查 token 预算 → 继续下一轮 或 停止
-- [ ] Token 预算管理：
-  - 总 token 预算（由 AgentConfig.max_turns 或 token 计数上限定义）
-  - 90% 阈值检测 → 发出警告继续
-  - "收益递减"检测：连续 3 轮 delta < 500 tokens → 自动停止
-  - 预算耗尽 → 注入 `max_turns_reached` 系统消息并 yield 最终结果
-- [ ] 上下文硬截断：总 token 超过模型 context window 的 80% → 保留最近 N 轮，丢弃更早轮次（以 user message 为切割边界）
-- [ ] Stop hooks 调用：每轮 assistant message 产出后，执行 Stop 类型 hook → hook 可返回 "should_stop=True" 提前终止循环
-- [ ] `Agent.run()` 实现：消费 `query()` generator，聚合为 `AgentResult`
-- [ ] `Agent.stream()` 实现：透传 `query()` generator 的 `AgentMessage` 流
+**功能**: `query()` 异步生成器，完整 turn 循环，token 预算管理，上下文硬截断，工具执行管线，CLI 交互式测试入口。
+
+**架构总览**
+
+```
+用户 prompt
+  │
+  ▼
+query() ──► enrich_context() ──► 系统提示词 (日期 + git status)
+  │
+  └── 每轮循环 ──► TokenBudget 检查 ──► 截断检查 ──► LLM 调用 ──►
+                     │                     │              │
+                     ▼                     ▼              ▼
+               is_exhausted?       hard_truncate()   stream_messages()
+                                                         │
+                                         ┌───────────────┴───────────────┐
+                                         ▼                               ▼
+                                   文本响应                         工具调用
+                                         │                               │
+                                         ▼                               ▼
+                                   yield DoneMessage              _execute_tools_sequential()
+                                                                        │
+                                                                        ▼
+                                                                  yield ToolResult
+                                                                        │
+                                                                        ▼
+                                                                  下一轮循环
+```
+
+**实现文件**:
+| 文件 | 职责 |
+|------|------|
+| `src/agent_core/query/loop.py` | `query()` 主循环 + 消息构建器 + 工具执行管线 |
+| `src/agent_core/query/budget.py` | `TokenBudget` 令牌预算 + 收益递减检测 + 上下文窗口感知 |
+| `src/agent_core/query/context.py` | `enrich_context()` 上下文富化（日期 + git status） |
+| `src/agent_core/query/truncate.py` | `hard_truncate()` 硬截断逻辑 |
+| `src/agent_core/cli.py` | 交互式 REPL 测试入口 + 配置文件加载 |
+| `src/agent_core/__main__.py` | `python -m agent_core` 模块入口 |
+
+---
+
+#### 4.1 `query()` — Agent 主循环入口
+
+```python
+async def query(
+    prompt: str,
+    config: AgentConfig,
+    trace_id: str,
+    permission_callback: PermissionCallback | None = None,
+    workspace_root: str | None = None,
+) -> AsyncGenerator[AgentMessage, None]:
+```
+
+整个 Agent 的心脏。协调 LLM 调用、工具执行、token 预算追踪、上下文截断和停止条件检测，产出 `AgentMessage` 流供 `Agent.run()` / `Agent.stream()` 消费。
+
+**参数**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `prompt` | `str` | 用户输入文本 |
+| `config` | `AgentConfig` | Agent 配置（模型、max_turns、tools、api_keys 等） |
+| `trace_id` | `str` | uuid4 hex 字符串，贯穿 Agent 生命周期和日志 |
+| `permission_callback` | `PermissionCallback \| None` | 异步权限回调，返回 `True` 允许 / `False` 拒绝 |
+| `workspace_root` | `str \| None` | 工作区根目录，用于安全边界和 git status 收集 |
+
+**返回值**: `AsyncGenerator[AgentMessage, None]`，产出 5 种消息类型：
+
+```
+AssistantText* → (ToolUse → ToolResult)* → DoneMessage
+                     │
+                     ├─ 有工具调用：执行后进入下一轮
+                     └─ 无工具调用：终端轮，DoneMessage 携带最终统计
+```
+
+**主循环流程**
+
+每轮依次执行以下步骤：
+
+```
+1. 初始化（仅执行一次）
+   ├─ enrich_context(workspace_root) → system 字符串
+   ├─ _build_initial_user_message(prompt) → messages[0]
+   ├─ get_client(model_id, config) → BaseClient 子类实例
+   ├─ client.convert_tools() → tools_schema
+   └─ TokenBudget(max_turns, context_window)
+
+2. Turn 循环 (turn_index = 1 .. max_turns)
+   │
+   ├─ 2a. 预算 / 截断检查
+   │   ├─ budget.is_exhausted() → yield DoneMessage("max_turns")
+   │   └─ estimate_tokens_from_messages() → hard_truncate() 条件触发
+   │
+   ├─ 2b. LLM 调用
+   │   ├─ client.stream_messages(messages, tools, system)
+   │   ├─ TurnTracer.wrap() → 收集 turn 级指标
+   │   └─ match event.type:
+   │       ├─ "stream_start"    → 内部消费（tracer）
+   │       ├─ "assistant_text"   → yield 透传
+   │       ├─ "tool_use"         → 累积 + yield
+   │       ├─ "token_counts"     → budget.record_turn() + total_tokens 累加
+   │       ├─ "stop"             → normalize_stop_reason()
+   │       └─ "error"            → yield + DoneMessage("error")
+   │
+   ├─ 2c. _build_assistant_message() → messages.append()
+   │
+   ├─ 2d. 无工具调用 → yield DoneMessage（终端轮）
+   │
+   └─ 2e. 有工具调用
+       ├─ _execute_tools_sequential() → yield ToolResult
+       ├─ _build_tool_result_user_message() → messages.append()
+       └─ budget.reset_diminishing_returns()
+
+3. 循环耗尽 → yield DoneMessage("max_turns")
+```
+
+---
+
+#### 4.2 消息构建器 (`loop.py` 内部函数)
+
+消息格式采用 Anthropic content-block 规范：每条消息有 `role` 和 `content` 字段，`content` 是一个 typed block 列表。
+
+**`_build_initial_user_message(prompt: str) -> dict`**
+
+将原始 prompt 包装为 `{"role": "user", "content": [{"type": "text", "text": prompt}]}`。
+
+**`_build_assistant_message(texts: list[str], tool_uses: list[ToolUse]) -> dict`**
+
+从累积的文本块和工具调用构建 assistant 消息：
+- 空/纯空白文本块被跳过
+- tool_use 块序列化为 `{"type": "tool_use", "id", "name", "input"}`
+
+**`_build_tool_result_user_message(tool_results: list[ToolResult]) -> dict`**
+
+将工具执行结果打包为 `role: "user"` 消息，每个结果为 `{"type": "tool_result", "tool_use_id", "content", "is_error"}` block。
+
+---
+
+#### 4.3 工具执行管线 (`_execute_tools_sequential`)
+
+```python
+async def _execute_tools_sequential(
+    tool_uses: list[ToolUse],
+    context: ToolUseContext,
+    permission_callback: PermissionCallback | None,
+) -> list[ToolResult]:
+```
+
+**当前实现**: 串行执行（Phase 2 item 5 将替换为完整的并发/串行编排管线）。
+
+单个工具执行生命周期（4 步）：
+
+| 步骤 | 说明 | 失败处理 |
+|------|------|----------|
+| 1. Resolve | `get_tool(name)` 从注册表查找 | `ToolResult(is_error=True, content="Unknown tool")` |
+| 2. Validate | `tool.validate_input(raw_dict)` Pydantic 校验 | `ToolResult(is_error=True, content="Invalid input: ...")` |
+| 3. Permission | `await permission_callback(name, input)` | `ToolResult(is_error=True, content="Permission denied")` |
+| 4. Execute | `await tool.call(validated_input, context)` | 异常 → `ToolResult(is_error=True, content="Tool execution error: ...")` |
+
+---
+
+#### 4.4 `TokenBudget` — 令牌预算管理 (`budget.py`)
+
+```python
+@dataclass
+class TokenBudget:
+    max_turns: int         # 轮次上限
+    context_window: int    # 模型上下文窗口大小
+
+    turn_count: int = 0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+```
+
+**属性**
+
+| 属性/方法 | 返回 | 说明 |
+|-----------|------|------|
+| `truncation_threshold` | `int` | `context_window × 0.8`，超过此值触发硬截断 |
+| `is_exhausted()` | `bool` | `turn_count >= max_turns` |
+| `diminishing_returns()` | `bool` | 最近 3 轮每轮 output delta < 500 tokens |
+| `needs_truncation(est)` | `bool` | 估算 tokens > `truncation_threshold` |
+| `total_tokens()` | `int` | `input + output` 总和 |
+
+**方法**
+
+| 方法 | 说明 |
+|------|------|
+| `record_turn(turn_index, input_tokens, output_tokens)` | 记录本轮用量，更新递减检测窗口（记录 output delta） |
+| `reset_diminishing_returns()` | 清空递减检测窗口——工具调用轮次后重置 |
+
+**上下文窗口感知 (`get_context_window`)**
+
+```python
+def get_context_window(model_id: ModelId) -> int:
+```
+
+| Provider | 模型 | 上下文窗口 |
+|----------|------|-----------|
+| Anthropic | claude-sonnet-4-5 / opus-4-7 / haiku-4-5 | 200,000 |
+| DeepSeek | deepseek-v4-pro / v4-flash | 128,000 |
+| OpenAI | gpt-4.1 / gpt-4.1-mini | 1,000,000 |
+| OpenAI | gpt-4o | 128,000 |
+| OpenAI | o4-mini | 200,000 |
+| 未知模型 | — | 200,000 (默认) |
+
+**Token 估算 (`estimate_tokens_from_messages`)**
+
+```python
+def estimate_tokens_from_messages(
+    messages: list[dict[str, Any]], system: str | None = None
+) -> int:
+```
+
+chars/4 启发式估算。仅在 API 调用前的截断检查中使用——API 调用后的真实 token 数由 `TokenCounts` 事件提供。
+
+---
+
+#### 4.5 上下文硬截断 (`truncate.py`)
+
+```python
+def hard_truncate(
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    min_rounds: int = 2,
+) -> list[dict[str, Any]]:
+```
+
+当消息历史超过 context window 的 80% 时丢弃最早轮次。
+
+**算法**: 以 `role: "user"` 为轮次边界分区 → 从最新轮次向前累积 → 估算超过 `max_tokens` 且保留 ≥ `min_rounds` 轮时停止 → 在最前方插入 `<system-reminder>` 通知。
+
+**设计要点**:
+- 截断边界对齐 user message（保证消息结构有效）
+- `min_rounds` 保证不丢光（至少保留最后 2 轮）
+- 无截断时不插入通知（返回原列表）
+
+---
+
+#### 4.6 上下文富化 (`context.py`)
+
+```python
+async def enrich_context(workspace_root: str | None = None) -> str:
+```
+
+在 `query()` 启动时执行一次（非每轮），收集环境信息作为 LLM 的 system 提示词前缀：
+
+| 信息 | 来源 | 格式 |
+|------|------|------|
+| 当前日期 | `date.today().isoformat()` | `Today's date is 2026-06-15.` |
+| Git 状态 | `git status --porcelain`（5s 超时） | `<git_status>...</git_status>` |
+
+失败静默吞没——git 不可用时仅返回日期，不抛异常。
+
+---
+
+#### 4.7 CLI 交互式测试入口 (`cli.py`)
+
+**两种启动方式**
+
+```powershell
+agent-core              # 安装后命令
+python -m agent_core    # 模块启动（无需安装）
+echo "prompt" | python -m agent_core  # 管道模式
+```
+
+**配置查找顺序**（先找到的生效）
+
+1. `$AGENT_CORE_CONFIG` 环境变量指定路径
+2. `./agent-core.config.json`（当前工作目录）
+3. `~/.agent-core/config.json`（用户目录）
+
+配置文件中未填的 `api_keys` fallback 到环境变量。
+
+**REPL 命令**
+
+| 输入 | 行为 |
+|------|------|
+| 任意文本 | 作为 prompt 发给 Agent，流式输出回复和工具调用 |
+| `/model <id>` | 运行时切换模型（如 `/model openai/gpt-4o`） |
+| `/model` | 查看当前模型 |
+| `/key <provider> <key>` | 运行时更新 API key |
+| `/help` | 显示帮助 |
+| `/quit` 或 `Ctrl+C` | 退出 |
+
+**配置文件格式** (`agent-core.config.json`)
+
+```json
+{
+    "_models": {
+        "anthropic": ["anthropic/claude-sonnet-4-5", ...],
+        "deepseek": ["deepseek/deepseek-v4-pro", ...],
+        "openai": ["openai/gpt-4o", ...]
+    },
+    "model": "anthropic/claude-sonnet-4-5",
+    "api_keys": {
+        "anthropic": "sk-ant-xxx",
+        "deepseek": "sk-xxx",
+        "openai": "sk-xxx"
+    },
+    "max_turns": 20,
+    "permission_mode": "bypassPermissions"
+}
+```
+
+`_models` 字段仅作文档用途，列出所有支持的模型供参考。实际解析时被忽略。
 
 ---
 
@@ -987,13 +1302,14 @@ async for event in tracer.wrap(client.stream_messages(messages, tools)):
 
 ## 统计
 
-| 阶段 | 条目 | 预估天数 |
-|------|------|----------|
-| Phase 1: 基础设施 | #1 脚手架 (2) + #2 Tool 框架 (2) + #3 多Provider集成 (3) | 7 |
-| Phase 2: Agent 核心循环 | #4 主循环 (4) + #5 管线+权限 (4) + #5.5 压缩 (2) + #6 MCP (2) | 12 |
-| Phase 3: 子Agent & 扩展 | #7 Agent 定义 (2) + #8 执行引擎 (5) + #9 Hooks/Plugin/Skills (2) | 9 |
-| Phase 4: 持久化 & 收尾 | #10 持久化 (2) + #11 测试/文档/发布 (2) | 4 |
-| **总计** | **12 条目** | **32 天 (~7 周)** |
+| 阶段 | 条目 | 预估天数 | 状态 |
+|------|------|----------|------|
+| Phase 1: 基础设施 | #1 脚手架 (2) + #2 Tool 框架 (2) + #3 多Provider集成 (3) | 7 | ✅ 已完成 |
+| Phase 2: Agent 核心循环 | #4 主循环 (4) + CLI测试入口 (1) | 5 | ✅ 已完成 |
+| Phase 2: 剩余 | #5 管线+权限 (4) + #5.5 压缩 (2) + #6 MCP (2) | 8 | ⬜ 待实现 |
+| Phase 3: 子Agent & 扩展 | #7 Agent 定义 (2) + #8 执行引擎 (5) + #9 Hooks/Plugin/Skills (2) | 9 | ⬜ 待实现 |
+| Phase 4: 持久化 & 收尾 | #10 持久化 (2) + #11 测试/文档/发布 (2) | 4 | ⬜ 待实现 |
+| **总计** | **13 条目** | **33 天 (~7 周)** | 已实现 ~40% |
 
 ---
 

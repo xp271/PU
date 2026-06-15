@@ -14,6 +14,8 @@ lifetime of a conversation.
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from datetime import date
 
 
@@ -31,6 +33,17 @@ async def enrich_context(workspace_root: str | None = None) -> str:
 
     # Current date
     parts.append(f"Today's date is {date.today().isoformat()}.")
+
+    # System environment
+    shell = os.environ.get("COMSPEC", os.environ.get("SHELL", "unknown"))
+    wd = workspace_root or os.getcwd()
+    parts.append(
+        "<environment>\n"
+        f"  Platform: {sys.platform}\n"
+        f"  Shell: {shell}\n"
+        f"  Workspace: {wd}\n"
+        "</environment>"
+    )
 
     # Git status (best-effort)
     cwd = workspace_root or "."
