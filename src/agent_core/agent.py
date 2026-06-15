@@ -5,6 +5,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
 from .models import AgentConfig, AgentMessage, AgentResult, StopReason
+from .query import query
 
 
 # Returns True to allow, False to deny. Widen to a PermissionDecision
@@ -52,7 +53,10 @@ class Agent:
         )
 
     async def stream(self, prompt: str) -> AsyncGenerator[AgentMessage, None]:
-        raise NotImplementedError(
-            "stream() must be implemented with query() generator logic"
-        )
-        yield  # pragma: no cover - unreachable; marks this as an async generator
+        async for message in query(
+            prompt=prompt,
+            config=self._config,
+            trace_id=self._trace_id,
+            permission_callback=self._permission_callback,
+        ):
+            yield message

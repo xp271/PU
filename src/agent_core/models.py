@@ -22,6 +22,7 @@ StopReason = Literal["end_turn", "max_turns", "permission_denied", "error"]
 class ModelProvider(str, Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
+    DEEPSEEK = "deepseek"
 
     @classmethod
     def known_providers(cls) -> set[str]:
@@ -40,6 +41,10 @@ class ModelProvider(str, Enum):
                 "gpt-4.1",
                 "gpt-4.1-mini",
                 "o4-mini",
+            ],
+            cls.DEEPSEEK: [
+                "deepseek-v4-pro",
+                "deepseek-v4-flash",
             ],
         }
 
@@ -169,6 +174,7 @@ class AgentConfig(BaseModel):
         env_var_map = {
             ModelProvider.ANTHROPIC: "ANTHROPIC_API_KEY",
             ModelProvider.OPENAI: "OPENAI_API_KEY",
+            ModelProvider.DEEPSEEK: "DEEPSEEK_API_KEY",
         }
         key = self.api_keys.get(provider.value)
         if key:

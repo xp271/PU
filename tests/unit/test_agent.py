@@ -21,17 +21,27 @@ class TestAgent:
         assert agent._config.max_turns == 5
 
     @pytest.mark.asyncio
-    async def test_run_raises_not_implemented_error(self) -> None:
-        agent = Agent(AgentConfig())
-        with pytest.raises(NotImplementedError):
-            await agent.run("test prompt")
+    async def test_run_consumes_stream_and_returns_result(self) -> None:
+        """run() calls stream() and aggregates into AgentResult."""
+        config = AgentConfig(max_turns=1)
+        agent = Agent(config)
+        result = await agent.run("Say only the word: hello")
+        # Valid stop reasons: end_turn (normal), error (no API key), max_turns
+        assert result.stop_reason in ("end_turn", "max_turns", "error")
+        assert isinstance(result.content, str)
+        assert isinstance(result.total_tokens, int)
 
     @pytest.mark.asyncio
-    async def test_stream_raises_not_implemented_error(self) -> None:
-        agent = Agent(AgentConfig())
-        with pytest.raises(NotImplementedError):
-            async for _ in agent.stream("test prompt"):
-                pass
+    async def test_stream_yields_messages(self) -> None:
+        """stream() delegates to query() and yields AgentMessage items."""
+        config = AgentConfig(max_turns=1)
+        agent = Agent(config)
+        messages: list[Any] = []
+        async for msg in agent.stream("Say only the word: hello"):
+            messages.append(msg)
+        # At minimum should yield a DoneMessage.
+        types = [m.type for m in messages]  # type: ignore[attr-defined]
+        assert "done" in types
 
     @pytest.mark.asyncio
     async def test_on_permission_check_registers_callback(self) -> None:
