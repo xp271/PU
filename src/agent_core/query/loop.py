@@ -13,11 +13,16 @@ and delegates provider details to ``BaseClient`` subclasses.
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
+import time as _time
 from collections.abc import AsyncGenerator
 from typing import Any
 
+import aiofiles
+import aiofiles.os
+
 from ..llm.base import get_client
-from ..llm.events import InternalEvent, StopEvent, StreamStart, TokenCounts
 from ..logging.tracer import TurnTracer
 from ..models import (
     AgentConfig,
@@ -28,7 +33,9 @@ from ..models import (
     ToolResult,
     ToolUse,
 )
-from ..tools.base import ToolUseContext
+from ..permissions.bash_guard import analyze_bash_command
+from ..permissions.engine import PermissionEngine
+from ..tools.base import ToolCallResult, ToolUseContext
 from ..tools.registry import get_tool
 from .budget import estimate_tokens_from_messages, get_context_window, TokenBudget
 from .context import enrich_context
@@ -75,6 +82,10 @@ async def query(
     model_id = config.model_id
     client = get_client(model_id, config)
     tools_schema = client.__class__.convert_tools(config.tools)
+
+    permission_engine = PermissionEngine.from_config(
+        permission_mode=config.permission_mode,
+    )
 
     budget = TokenBudget(
         max_turns=config.max_turns,
@@ -189,8 +200,12 @@ async def query(
             return
 
         # -- 2e. Execute tools & yield results ------------------------------
-        tool_results = await _execute_tools_sequential(
-            tool_uses_in_turn, tool_context, permission_callback
+        tool_results = await run_tools(
+            tool_uses_in_turn,
+            tool_context,
+            permission_callback=permission_callback,
+            permission_engine=permission_engine,
+            max_concurrency=config.max_concurrency,
         )
         for tr in tool_results:
             yield tr
@@ -266,98 +281,235 @@ def _build_tool_result_user_message(
 
 
 # ---------------------------------------------------------------------------
-# Tool execution (minimal — replaced by full pipeline in Phase 2 / item 5)
+# Tool execution pipeline (Phase 2 / item 5)
 # ---------------------------------------------------------------------------
 
+_RESULT_TRUNCATION_BYTES = 50 * 1024  # 50 KB
+_RESULT_PREVIEW_CHARS = 1_500
 
-async def _execute_tools_sequential(
+
+async def run_tools(
     tool_uses: list[ToolUse],
     context: ToolUseContext,
-    permission_callback: PermissionCallback | None,
+    *,
+    permission_callback: PermissionCallback | None = None,
+    permission_engine: PermissionEngine | None = None,
+    max_concurrency: int = 5,
 ) -> list[ToolResult]:
-    """Execute tool-use requests one at a time, in order.
+    """Execute a batch of tool-use requests with concurrency orchestration.
 
-    This is a placeholder for the full tool-execution pipeline (Phase 2
-    item 5).  The replacement will add concurrency grouping, hook
-    pipelines, result persistence, and bash AST safety checks — but its
-    signature must remain compatible:
-    ``(list[ToolUse], ToolUseContext, callback) -> list[ToolResult]``.
+    Non-concurrency-safe tools run serially; concurrency-safe tools run
+    in parallel with an ``asyncio.Semaphore`` cap.  Results are returned
+    in the same order as *tool_uses*.
+
+    **Signature** — compatible replacement for the old
+    ``_execute_tools_sequential``.
     """
-    results: list[ToolResult] = []
+    # Fast path: single tool — no concurrency overhead
+    if len(tool_uses) == 1:
+        tu = tool_uses[0]
+        return [await run_tool_use(tu, context, permission_callback, permission_engine)]
 
-    for tu in tool_uses:
-        # 1. Resolve
-        try:
-            tool = get_tool(tu.tool_name)
-        except KeyError:
-            results.append(
-                ToolResult(
-                    tool_use_id=tu.tool_use_id,
-                    tool_name=tu.tool_name,
-                    content=f"Unknown tool: {tu.tool_name}",
+    results: dict[int, ToolResult] = {}
+    pending_batch: list[tuple[int, ToolUse]] = []
+
+    for idx, tu in enumerate(tool_uses):
+        is_concurrent = _tool_is_concurrency_safe(tu.tool_name)
+
+        if is_concurrent:
+            pending_batch.append((idx, tu))
+        else:
+            # Flush pending concurrent batch first
+            if pending_batch:
+                batch_results = await _run_concurrent_batch(
+                    pending_batch, context, permission_callback,
+                    permission_engine, max_concurrency,
+                )
+                results.update(batch_results)
+                pending_batch.clear()
+            # Execute serial tool
+            results[idx] = await run_tool_use(
+                tu, context, permission_callback, permission_engine,
+            )
+
+    # Flush remaining concurrent batch
+    if pending_batch:
+        batch_results = await _run_concurrent_batch(
+            pending_batch, context, permission_callback,
+            permission_engine, max_concurrency,
+        )
+        results.update(batch_results)
+
+    return [results[i] for i in range(len(tool_uses))]
+
+
+async def run_tool_use(
+    tool_use: ToolUse,
+    context: ToolUseContext,
+    permission_callback: PermissionCallback | None = None,
+    permission_engine: PermissionEngine | None = None,
+) -> ToolResult:
+    """Execute a single tool-use through its 7-step lifecycle:
+
+    1. resolve   — registry lookup
+    2. validate  — Pydantic validation
+    3. bash_guard — BashTool AST safety check
+    4. permission — engine + callback
+    5. pre-hooks  — (placeholder — hooks system not yet implemented, Item 9)
+    6. execute   — ``tool.call()``
+    7. persist   — large results → temp file, truncated preview
+    """
+    # ---- 1. resolve ---------------------------------------------------------
+    try:
+        tool = get_tool(tool_use.tool_name)
+    except KeyError:
+        return ToolResult(
+            tool_use_id=tool_use.tool_use_id,
+            tool_name=tool_use.tool_name,
+            content=f"Unknown tool: {tool_use.tool_name}",
+            is_error=True,
+        )
+
+    # ---- 2. validate --------------------------------------------------------
+    try:
+        validated_input = tool.validate_input(tool_use.tool_input)
+    except Exception as exc:
+        return ToolResult(
+            tool_use_id=tool_use.tool_use_id,
+            tool_name=tool_use.tool_name,
+            content=f"Invalid input: {exc}",
+            is_error=True,
+        )
+
+    # ---- 3. bash_guard (BashTool only) --------------------------------------
+    if tool.name == "Bash":
+        command = tool_use.tool_input.get("command", "")
+        if command:
+            safety = analyze_bash_command(command)
+            if not safety.safe:
+                return ToolResult(
+                    tool_use_id=tool_use.tool_use_id,
+                    tool_name=tool_use.tool_name,
+                    content=(
+                        "Bash command blocked by safety check:\n"
+                        + "\n".join(f"  - {w}" for w in safety.warnings)
+                    ),
                     is_error=True,
                 )
-            )
-            continue
 
-        # 2. Validate input
-        try:
-            validated_input = tool.validate_input(tu.tool_input)
-        except Exception as exc:
-            results.append(
-                ToolResult(
-                    tool_use_id=tu.tool_use_id,
-                    tool_name=tu.tool_name,
-                    content=f"Invalid input: {exc}",
-                    is_error=True,
-                )
-            )
-            continue
+    # ---- 4. permission ------------------------------------------------------
+    engine = permission_engine or PermissionEngine()
+    decision = await engine.check(
+        tool_name=tool_use.tool_name,
+        tool_input=tool_use.tool_input,
+        callback=permission_callback,
+        tool_is_read_only=tool.is_read_only,
+        tool_is_destructive=tool.is_destructive,
+    )
+    if not decision.allowed:
+        return ToolResult(
+            tool_use_id=tool_use.tool_use_id,
+            tool_name=tool_use.tool_name,
+            content=f"Permission denied: {decision.reason}",
+            is_error=True,
+        )
 
-        # 3. Permission check
-        if permission_callback is not None:
-            try:
-                allowed = await permission_callback(tu.tool_name, tu.tool_input)
-                if not allowed:
-                    results.append(
-                        ToolResult(
-                            tool_use_id=tu.tool_use_id,
-                            tool_name=tu.tool_name,
-                            content="Permission denied",
-                            is_error=True,
-                        )
-                    )
-                    continue
-            except Exception as exc:
-                results.append(
-                    ToolResult(
-                        tool_use_id=tu.tool_use_id,
-                        tool_name=tu.tool_name,
-                        content=f"Permission callback error: {exc}",
-                        is_error=True,
-                    )
-                )
-                continue
+    # ---- 5. pre-hooks (placeholder — Item 9) --------------------------------
+    # Hooks system not yet implemented.  When available, iterate registered
+    # PreToolUse hooks here; any hook returning "block" terminates early.
 
-        # 4. Execute
-        try:
-            result = await tool.call(validated_input, context)
-            results.append(
-                ToolResult(
-                    tool_use_id=tu.tool_use_id,
-                    tool_name=tu.tool_name,
-                    content=result.content,
-                    is_error=result.is_error,
-                )
-            )
-        except Exception as exc:
-            results.append(
-                ToolResult(
-                    tool_use_id=tu.tool_use_id,
-                    tool_name=tu.tool_name,
-                    content=f"Tool execution error: {exc}",
-                    is_error=True,
-                )
-            )
+    # ---- 6. execute ---------------------------------------------------------
+    try:
+        result: ToolCallResult = await tool.call(validated_input, context)
+    except Exception as exc:
+        return ToolResult(
+            tool_use_id=tool_use.tool_use_id,
+            tool_name=tool_use.tool_name,
+            content=f"Tool execution error: {exc}",
+            is_error=True,
+        )
 
-    return results
+    # ---- 7. persist — large results → temp file (async I/O) -------------------
+    content, is_error = await _persist_large_result(
+        result, tool_use.tool_name, context.agent_id,
+    )
+
+    return ToolResult(
+        tool_use_id=tool_use.tool_use_id,
+        tool_name=tool_use.tool_name,
+        content=content,
+        is_error=is_error,
+    )
+
+
+# ---- internal helpers -------------------------------------------------------
+
+
+def _tool_is_concurrency_safe(tool_name: str) -> bool:
+    """Check ``is_concurrency_safe`` without instantiating the tool."""
+    try:
+        tool = get_tool(tool_name)
+    except KeyError:
+        return True  # unknown tools fail fast; safe to treat as concurrent
+    return tool.is_concurrency_safe
+
+
+async def _run_concurrent_batch(
+    batch: list[tuple[int, ToolUse]],
+    context: ToolUseContext,
+    permission_callback: PermissionCallback | None,
+    permission_engine: PermissionEngine | None,
+    max_concurrency: int,
+) -> dict[int, ToolResult]:
+    """Execute a batch of concurrency-safe tools in parallel."""
+    sem = asyncio.Semaphore(max_concurrency)
+
+    async def _one(idx: int, tu: ToolUse) -> tuple[int, ToolResult]:
+        async with sem:
+            result = await run_tool_use(
+                tu, context, permission_callback, permission_engine,
+            )
+        return idx, result
+
+    tasks = [_one(idx, tu) for idx, tu in batch]
+    gathered = await asyncio.gather(*tasks)
+    return dict(gathered)
+
+
+async def _persist_large_result(
+    result: ToolCallResult,
+    tool_name: str,
+    agent_id: str,
+) -> tuple[object, bool]:
+    """If *result.content* is a large string, persist to temp file and truncate.
+
+    Uses ``aiofiles`` for async I/O to avoid blocking the event loop when
+    writing multi-MB tool outputs (e.g. Grep on a large codebase).
+    """
+    content = result.content
+    if not isinstance(content, str):
+        return content, result.is_error
+
+    byte_len = len(content.encode("utf-8"))
+    if byte_len <= _RESULT_TRUNCATION_BYTES:
+        return content, result.is_error
+
+    # Build temp path — directory creation via aiofiles.os to stay async
+    ts = _time.strftime("%Y%m%d_%H%M%S")
+    tmp_dir = tempfile.gettempdir()
+    results_dir = f"{tmp_dir}/agent_core/results/{agent_id}"
+    await aiofiles.os.makedirs(results_dir, exist_ok=True)
+
+    fname = f"{ts}_{tool_name}_{os.urandom(4).hex()}.txt"
+    fpath = f"{results_dir}/{fname}"
+
+    async with aiofiles.open(fpath, "w", encoding="utf-8") as fh:
+        await fh.write(content)
+
+    preview = content[:_RESULT_PREVIEW_CHARS]
+    truncated = (
+        f"{preview}\n\n"
+        f"[Content truncated: {_RESULT_PREVIEW_CHARS} chars shown. "
+        f"Full result ({byte_len} bytes) saved to: {fpath}]"
+    )
+    return truncated, False

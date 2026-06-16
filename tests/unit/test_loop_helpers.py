@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import pytest
 
 from agent_core.models import ToolResult, ToolUse
+from agent_core.permissions.engine import PermissionEngine
 from agent_core.query.loop import (
     _build_assistant_message,
     _build_initial_user_message,
     _build_tool_result_user_message,
-    _execute_tools_sequential,
+    run_tool_use,
+    run_tools,
 )
 from agent_core.tools.base import ToolUseContext
 
@@ -99,7 +100,7 @@ class TestBuildToolResultUserMessage:
 
 
 @pytest.mark.asyncio
-class TestExecuteToolsSequential:
+class TestExecuteTools:
     async def test_known_tool(self) -> None:
         ctx = ToolUseContext()
         tu = ToolUse(
@@ -107,11 +108,12 @@ class TestExecuteToolsSequential:
             tool_name="Read",
             tool_input={"file_path": "/nonexistent"},
         )
-        results = await _execute_tools_sequential([tu], ctx, None)
-        assert len(results) == 1
+        # Bypass permissions so the engine doesn't interfere
+        engine = PermissionEngine(mode="bypassPermissions")
+        result = await run_tool_use(tu, ctx, permission_engine=engine)
         # Read fails because file doesn't exist, but should NOT be an
         # "unknown tool" or "permission denied" error — it's a tool-level error.
-        assert results[0].tool_use_id == "tu_1"
+        assert result.tool_use_id == "tu_1"
 
     async def test_unknown_tool(self) -> None:
         ctx = ToolUseContext()
@@ -120,10 +122,10 @@ class TestExecuteToolsSequential:
             tool_name="NonExistentTool",
             tool_input={},
         )
-        results = await _execute_tools_sequential([tu], ctx, None)
-        assert len(results) == 1
-        assert results[0].is_error is True
-        assert "Unknown tool" in str(results[0].content)
+        engine = PermissionEngine(mode="bypassPermissions")
+        result = await run_tool_use(tu, ctx, permission_engine=engine)
+        assert result.is_error is True
+        assert "Unknown tool" in str(result.content)
 
     async def test_permission_denied(self) -> None:
         ctx = ToolUseContext()
@@ -131,15 +133,16 @@ class TestExecuteToolsSequential:
         async def deny_all(_name: str, _inp: dict) -> bool:
             return False
 
+        # Use "Bash" — its default rule is "ask", so the callback IS reached.
         tu = ToolUse(
             tool_use_id="tu_1",
-            tool_name="Read",
-            tool_input={"file_path": "/f.txt"},
+            tool_name="Bash",
+            tool_input={"command": "echo hello"},
         )
-        results = await _execute_tools_sequential([tu], ctx, deny_all)
-        assert len(results) == 1
-        assert results[0].is_error is True
-        assert "Permission denied" in str(results[0].content)
+        engine = PermissionEngine(mode="ask")
+        result = await run_tool_use(tu, ctx, deny_all, permission_engine=engine)
+        assert result.is_error is True
+        assert "Permission denied" in str(result.content)
 
     async def test_permission_allowed(self) -> None:
         ctx = ToolUseContext()
@@ -147,16 +150,16 @@ class TestExecuteToolsSequential:
         async def allow_all(_name: str, _inp: dict) -> bool:
             return True
 
+        # Use "Bash" — default rule is "ask", callback reached.
         tu = ToolUse(
             tool_use_id="tu_1",
-            tool_name="Read",
-            tool_input={"file_path": "/nonexistent"},
+            tool_name="Bash",
+            tool_input={"command": "echo hello"},
         )
-        results = await _execute_tools_sequential([tu], ctx, allow_all)
-        assert len(results) == 1
-        # Permission passed; tool-level error (file not found) is not
-        # the same as "Permission denied".
-        assert "Permission denied" not in str(results[0].content)
+        engine = PermissionEngine(mode="ask")
+        result = await run_tool_use(tu, ctx, allow_all, permission_engine=engine)
+        # Permission passed; Bash executes fine.
+        assert "Permission denied" not in str(result.content)
 
     async def test_multiple_tools_sequential(self) -> None:
         ctx = ToolUseContext()
@@ -166,7 +169,10 @@ class TestExecuteToolsSequential:
             tool_name="Read",
             tool_input={"file_path": "/nonexistent"},
         )
-        results = await _execute_tools_sequential([tu1, tu2], ctx, None)
+        engine = PermissionEngine(mode="bypassPermissions")
+        results = await run_tools(
+            [tu1, tu2], ctx, permission_engine=engine,
+        )
         assert len(results) == 2
         # First failed (unknown tool), second executed (Read succeeds but
         # file not found is still a tool call result, not a crash).

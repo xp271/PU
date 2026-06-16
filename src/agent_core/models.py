@@ -144,6 +144,15 @@ class AgentConfig(BaseModel):
             "Unknown names are still warned about, not rejected."
         ),
     )
+    max_concurrency: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description=(
+            "Maximum number of concurrency-safe tools to execute in parallel "
+            "during a single turn."
+        ),
+    )
 
     # -- New fields for multi-provider support --
 
