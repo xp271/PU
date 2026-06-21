@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from .budget import estimate_tokens_from_messages
+from ..compression.trigger import _partition_rounds
 
 
 def hard_truncate(
@@ -43,18 +44,7 @@ def hard_truncate(
         return list(messages)
 
     # -- 1. Partition messages into rounds (oldest → newest) ---------------
-    rounds: list[list[dict[str, Any]]] = []
-    current_round: list[dict[str, Any]] = []
-
-    for msg in messages:
-        role = msg.get("role", "")
-        if role == "user" and current_round:
-            rounds.append(current_round)
-            current_round = []
-        current_round.append(msg)
-
-    if current_round:
-        rounds.append(current_round)
+    rounds = _partition_rounds(messages)
 
     # -- 2. Walk backwards, accumulating the most recent rounds ------------
     kept_rounds: list[list[dict[str, Any]]] = []

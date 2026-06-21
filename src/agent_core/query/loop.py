@@ -13,11 +13,14 @@ and delegates provider details to ``BaseClient`` subclasses.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
 import time as _time
 from collections.abc import AsyncGenerator
 from typing import Any
+
+logger = logging.getLogger("agent_core.query")
 
 import aiofiles
 import aiofiles.os
@@ -28,6 +31,7 @@ from ..models import (
     AgentConfig,
     AgentMessage,
     AssistantText,
+    CompactMessage,
     DoneMessage,
     ErrorMessage,
     ToolResult,
@@ -40,6 +44,8 @@ from ..tools.registry import get_tool
 from .budget import estimate_tokens_from_messages, get_context_window, TokenBudget
 from .context import enrich_context
 from .truncate import hard_truncate
+from ..compression.trigger import can_compress
+from ..compression.summarizer import compress, CompressionError
 
 # Re-export for callers that only import from query
 PermissionCallback = Any  # Callable[[str, dict[str, Any]], Awaitable[bool]]
@@ -108,9 +114,82 @@ async def query(
 
         estimated = estimate_tokens_from_messages(messages, system)
         if budget.needs_truncation(estimated):
-            messages = hard_truncate(
-                messages, max_tokens=budget.truncation_threshold
-            )
+            # -- Compression preferred; truncation as fallback ---------------
+            if can_compress(messages, config.compression):
+                from ..compression.trigger import _partition_rounds
+
+                rounds = _partition_rounds(messages)
+                round_count = len(rounds)
+                compressed_rounds = round_count - config.compression.keep_recent_rounds
+
+                yield CompactMessage(
+                    status="started",
+                    rounds_compressed=compressed_rounds,
+                    rounds_preserved=config.compression.keep_recent_rounds,
+                    tokens_before=estimated,
+                )
+
+                try:
+                    messages, summary, attempts = await compress(
+                        client=client,
+                        messages=messages,
+                        system=system if system else None,
+                        model_id=model_id,
+                        config=config.compression,
+                    )
+
+                    new_estimated = estimate_tokens_from_messages(messages, system)
+                    ratio = new_estimated / estimated if estimated > 0 else 0
+
+                    # Accumulate compression token costs (not counted as turns)
+                    for attempt in attempts:
+                        budget.total_input_tokens += attempt.input_tokens_consumed
+                        budget.total_output_tokens += attempt.output_tokens_consumed
+                        total_tokens += attempt.tokens_consumed
+
+                    yield CompactMessage(
+                        status="completed",
+                        rounds_compressed=compressed_rounds,
+                        rounds_preserved=config.compression.keep_recent_rounds,
+                        tokens_before=estimated,
+                        tokens_after=new_estimated,
+                        compression_ratio=ratio,
+                        summary=summary,
+                        retries_used=len(attempts) - 1,
+                    )
+
+                    estimated = new_estimated
+                    tool_context.messages = messages
+
+                    # Compression succeeded but might still be over threshold
+                    if budget.needs_truncation(estimated):
+                        messages = hard_truncate(
+                            messages, max_tokens=budget.truncation_threshold
+                        )
+                        tool_context.messages = messages
+
+                except CompressionError as exc:
+                    logger.warning(
+                        "Compression failed (retries exhausted), "
+                        "falling back to hard truncation: %s",
+                        exc,
+                    )
+                    yield CompactMessage(
+                        status="skipped",
+                        tokens_before=estimated,
+                        error_detail=str(exc),
+                    )
+                    messages = hard_truncate(
+                        messages, max_tokens=budget.truncation_threshold
+                    )
+                    tool_context.messages = messages
+
+            else:
+                # Compression unavailable — direct truncation
+                messages = hard_truncate(
+                    messages, max_tokens=budget.truncation_threshold
+                )
+                tool_context.messages = messages
 
         # -- 2b. LLM call ---------------------------------------------------
         try:

@@ -107,6 +107,62 @@ class ModelId:
 
 
 # ---------------------------------------------------------------------------
+# CompressionConfig
+# ---------------------------------------------------------------------------
+
+
+class CompressionConfig(BaseModel):
+    """Auto-compression configuration. All fields are optional with sensible defaults.
+
+    Compression shares the same trigger threshold as hard truncation
+    (context window × 0.8, defined by TokenBudget.truncation_threshold).
+    When the threshold is crossed, compression is *always* preferred
+    over truncation.  Truncation is only used when compression is
+    disabled, has no old rounds to compress, or fails after all retries.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable auto-compression (when False, fall through to hard truncate directly)",
+    )
+    keep_recent_rounds: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Number of recent conversation rounds to keep uncompressed",
+    )
+    summary_max_tokens: int = Field(
+        default=2048,
+        ge=512,
+        le=8192,
+        description="Maximum tokens for the LLM summary response",
+    )
+    tool_result_preview_chars: int = Field(
+        default=200,
+        ge=50,
+        le=500,
+        description="Truncation preview character count for tool results in the compression prompt",
+    )
+    max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description=(
+            "Maximum retries when compression verification fails. "
+            "0 means no retry — fail straight to hard truncation."
+        ),
+    )
+    prompt_template: str | None = Field(
+        default=None,
+        description=(
+            "Custom compression request prompt template. Must contain "
+            "``{preview_chars}`` and ``{conversation_text}`` placeholders. "
+            "When None (default), the built-in template is used."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # AgentConfig
 # ---------------------------------------------------------------------------
 
@@ -152,6 +208,10 @@ class AgentConfig(BaseModel):
             "Maximum number of concurrency-safe tools to execute in parallel "
             "during a single turn."
         ),
+    )
+    compression: CompressionConfig = Field(
+        default_factory=CompressionConfig,
+        description="Auto-compression configuration",
     )
 
     # -- New fields for multi-provider support --
@@ -305,7 +365,26 @@ class DoneMessage(BaseModel):
     error_detail: str | None = None
 
 
+class CompactMessage(BaseModel):
+    """Compression event notification emitted during the agent stream.
+
+    Allows callers to observe and log compression activity.  Non-breaking —
+    callers that do not match this variant simply ignore it.
+    """
+
+    type: Literal["compact"] = "compact"
+    status: Literal["started", "completed", "skipped"]
+    rounds_compressed: int = 0
+    rounds_preserved: int = 0
+    tokens_before: int = 0
+    tokens_after: int = 0
+    compression_ratio: float = 0.0
+    summary: str | None = None
+    retries_used: int = 0
+    error_detail: str | None = None
+
+
 AgentMessage = Annotated[
-    AssistantText | ToolUse | ToolResult | ErrorMessage | DoneMessage,
+    AssistantText | ToolUse | ToolResult | ErrorMessage | DoneMessage | CompactMessage,
     Field(discriminator="type"),
 ]

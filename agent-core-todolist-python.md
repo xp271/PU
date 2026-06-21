@@ -1080,39 +1080,288 @@ echo "prompt" | python -m agent_core  # 管道模式
 
 ---
 
-### 5. 工具执行管线 & 权限系统 (4 天)
+### 5. 工具执行管线 & 权限系统 — 已实现
 
-**功能**: 并发/串行工具编排，单工具执行生命周期，权限规则引擎（含子 Agent 权限继承语义），Bash 专用的 AST 级安全检查。
+**功能**: 并发/串行工具编排，7 步单工具生命周期，权限规则引擎（含子 Agent 权限继承契约），Bash AST 级安全检查，大结果异步持久化。
 
-**原因**: 这是 Agent 的安全边界。权限引擎的设计必须在此时就覆盖**子 Agent 权限继承**场景——AgentDefinition 的 permission_mode 和 disallowed_tools 如何从父级派生、子 Agent 能否提升自己的权限，这些语义如果等到第 8 项再做会回头返工权限模型。
+**原因**: 这是 Agent 的安全边界。权限引擎的设计在此时就覆盖了**子 Agent 权限继承**场景——AgentDefinition 的 permission_mode 和 disallowed_tools 如何从父级派生、子 Agent 能否提升自己的权限，这些语义如果等到第 8 项再做会回头返工权限模型。
 
-- [ ] `run_tools(tool_use_blocks, context)` → AsyncGenerator：
-  - 按 `Tool.is_concurrency_safe` 类属性分组（无需实例化）
-  - 并发安全组 → `asyncio.gather()` + `asyncio.Semaphore(max_concurrency)` 控制并发上限
-  - 非并发工具 → 串行 `for ... await` 执行
-  - 同一轮工具调用的结果按 tool_use 原始顺序输出
-- [ ] `run_tool_use(tool_use, context)` → 单工具生命周期：
-  - resolve_tool（注册表按名查找）
-  - validate_input（Pydantic 校验，失败 → 返回 error tool_result，跳过权限检查）
-  - check_permissions（权限引擎裁决）
-  - 执行 PreToolUse hooks（任一 hook 返回 block → 终止）
-  - `tool.call()`
-  - 执行 PostToolUse hooks（可修改输出 / 添加上下文消息 / 阻断后续）
-  - 结果持久化（超大结果分片存储到临时文件，tool_result 只保留前 N 字符 + 文件路径引用）
-- [ ] 权限规则引擎：
-  - 匹配链（按优先级）：精确匹配 → 前缀匹配 → `fnmatch` 通配符 → 路径约束 → mode-specific → read-only → fallback
-  - 规则持久化格式（settings.json permissions 段，pydantic model）
-  - 权限回调注入：`agent.on_permission_check(async callable)` —— 调用方自定义决策
-- [ ] 子 Agent 权限继承（与第 7/8 项联动，此时先定义契约）：
-  - 子 Agent 的 permission_mode 取 `min(父agent实际模式, AgentDefinition.permission_mode)`
-  - disallowed_tools 取父级并集（父级禁止的，子级必然禁止）
-  - allowed_tools 取交集（子级只能使用父级也允许的工具）
-  - 子 Agent 永远不能提升自己权限（bypassPermissions → ask 方向可降不可升）
-- [ ] Bash 工具专用安全检查：
-  - tree-sitter + tree-sitter-bash 解析 shell 命令 AST
-  - 复合命令逐子命令检查（`&&` / `|` / `;` / `$()` / 反引号）
-  - 危险模式检测（`curl | bash`、`rm -rf /`、`chmod 777`、`/dev/null` 重定向覆盖关键文件）
-  - 异步轻量 LLM 分类器作为第二道防线（可选，调用方注入）
+**实现文件**:
+
+| 文件 | 职责 |
+|------|------|
+| `src/agent_core/query/loop.py` | `run_tools()` + `run_tool_use()` 工具管线（替代 `_execute_tools_sequential`） |
+| `src/agent_core/permissions/__init__.py` | 公开 API 导出 |
+| `src/agent_core/permissions/engine.py` | `PermissionEngine` 规则引擎 + `PermissionDecision` |
+| `src/agent_core/permissions/rules.py` | `PermissionRule` Pydantic 模型 + `default_rules()` |
+| `src/agent_core/permissions/inheritance.py` | 子 Agent 权限继承 3 个纯函数合约 |
+| `src/agent_core/permissions/bash_guard.py` | `analyze_bash_command()` + `BashSafetyResult` |
+| `tests/unit/test_permissions.py` | 41 个单元测试（引擎 + 继承 + bash guarded） |
+| `tests/unit/test_loop_helpers.py` | 工具管线集成测试（更新为 `run_tools` / `run_tool_use`） |
+
+---
+
+#### 5.1 工具执行管线 (`query/loop.py`)
+
+##### `run_tools()` — 并发/串行编排
+
+```python
+async def run_tools(
+    tool_uses: list[ToolUse],
+    context: ToolUseContext,
+    *,
+    permission_callback: PermissionCallback | None = None,
+    permission_engine: PermissionEngine | None = None,
+    max_concurrency: int = 5,
+) -> list[ToolResult]:
+```
+
+**编排逻辑**：
+
+```
+遍历 tool_uses（保持原始 index）
+  │
+  ├─ 工具 is_concurrency_safe? 
+  │   ├─ True  → 累积到 pending_batch
+  │   └─ False → flush pending_batch（并发执行）→ 串行执行当前工具
+  │
+  └─ 循环结束 → flush 剩余 pending_batch
+```
+
+1. 按 `Tool.is_concurrency_safe` 类属性分组（通过 `get_tool(name)` 查询，无需实例化）
+2. 并发安全组 → `asyncio.Semaphore(max_concurrency)` + `asyncio.gather()` 
+3. 非并发工具 → 串行 `await run_tool_use()`
+4. 结果按原始 `tool_uses` 顺序输出（通过 `dict[int, ToolResult]` → index 排序）
+
+##### `run_tool_use()` — 单工具 7 步生命周期
+
+```python
+async def run_tool_use(
+    tool_use: ToolUse,
+    context: ToolUseContext,
+    permission_callback: PermissionCallback | None = None,
+    permission_engine: PermissionEngine | None = None,
+) -> ToolResult:
+```
+
+```
+1. resolve     → get_tool(name) → 失败返回 error ToolResult
+2. validate    → tool.validate_input(raw_dict) → Pydantic 校验，失败返回 error
+3. bash_guard  → BashTool 时调用 analyze_bash_command() → 不安全则拒绝
+4. permission  → engine.check(tool_name, input, callback, is_read_only, is_destructive)
+5. pre-hooks   → (占位 — hooks 系统 Item 9 实现后接入)
+6. execute     → await tool.call(validated_input, context)
+7. persist     → 结果 > 50KB 时 aiofiles 异步写入临时文件，展示截断预览
+```
+
+**步骤 5 (pre-hooks) 说明**：当前 `AgentConfig.hooks` 默认 `[]`，`hooks/` 目录为空。管线保留 hook 调用接口但暂时跳过执行——Item 9 实现后无接口变更即可接入。
+
+---
+
+#### 5.2 权限规则模型 (`permissions/rules.py`)
+
+```python
+PermissionAction = Literal["allow", "deny", "ask"]
+
+class PermissionRule(BaseModel):
+    tool_pattern: str          # 精确 / 前缀* / fnmatch 通配符
+    action: PermissionAction = "ask"
+    priority: int = 0          # 越小优先级越高；同优先度按 exact > prefix > wildcard
+    path_constraint: str | None = None  # 可选路径 glob 约束
+    description: str = ""      # 面向用户的规则说明
+```
+
+**匹配模式**：
+
+| 模式 | pattern | 匹配示例 |
+|------|---------|----------|
+| 精确 | `"Bash"` | 仅匹配 `"Bash"` |
+| 前缀 | `"File*"` | `"FileReadTool"`, `"FileWriteTool"` |
+| fnmatch | `"mcp__*"` | `"mcp__github__list_issues"` |
+
+**内置默认规则** (`default_rules()`)：
+
+| tool_pattern | action | priority | 说明 |
+|-------------|--------|----------|------|
+| `Read` | allow | 100 | 文件读取始终安全 |
+| `Glob` | allow | 100 | 文件列表始终安全 |
+| `Grep` | allow | 100 | 内容搜索始终安全 |
+| `Bash` | ask | 100 | Shell 命令需显式批准 |
+| `Edit` | ask | 100 | 文件编辑需批准 |
+| `Write` | ask | 100 | 文件写入需批准 |
+
+---
+
+#### 5.3 权限规则引擎 (`permissions/engine.py`)
+
+##### `PermissionDecision`
+
+```python
+class PermissionDecision(BaseModel):
+    allowed: bool
+    reason: str
+    source: Literal["rule", "mode", "callback", "default"]
+```
+
+##### `PermissionEngine`
+
+```python
+class PermissionEngine:
+    def __init__(
+        self,
+        rules: list[PermissionRule] | None = None,  # None → default_rules()
+        mode: PermissionMode = "ask",
+    ) -> None: ...
+
+    @property
+    def mode(self) -> PermissionMode: ...
+
+    async def check(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        callback: PermissionCallback | None,
+        tool_is_read_only: bool = False,
+        tool_is_destructive: bool = False,
+    ) -> PermissionDecision: ...
+
+    @classmethod
+    def from_config(
+        cls,
+        permission_mode: PermissionMode = "ask",
+        tools: list[str] | None = None,
+    ) -> "PermissionEngine": ...
+```
+
+**7 步匹配链**：
+
+```
+1. 精确 tool_pattern 匹配 (rule.action=allow/deny → 立即返回；ask → fall through)
+2. 前缀匹配 (pattern 以 * 结尾，tool_name 以此为前缀)
+3. fnmatch 通配符 (支持 * ? [])
+4. path_constraint 检查 (规则含路径约束时，校验 tool_input 中的路径字段)
+5. PermissionMode 回退
+   ├─ bypassPermissions → allowed (source="mode")
+   └─ acceptEdits + 非破坏性 → allowed (source="mode")
+6. read_only 兜底 → allowed (source="default")
+7. 默认 ask → 调用 callback 或 拒绝破坏性/允许只读 (source="callback"|"default")
+```
+
+**PermissionMode 行为**：
+
+| Mode | 破坏性工具 | 非破坏性工具 | 绕过规则? |
+|------|-----------|-------------|----------|
+| `bypassPermissions` | allowed | allowed | 否 — 规则 (step 1-4) 仍先匹配 |
+| `acceptEdits` | fall through → ask | allowed (step 5) | 否 |
+| `ask` | callback 或拒绝 | callback 或允许 (step 6) | 否 |
+
+> 规则始终先于 mode 匹配。即使 mode=bypassPermissions，一条 priority=0 的 deny 规则仍可阻止工具。
+
+---
+
+#### 5.4 子 Agent 权限继承 (`permissions/inheritance.py`)
+
+**纯函数合约**（不依赖 `AgentDefinition` — Item 7 实现后直接调用）：
+
+```python
+def compute_child_permission_mode(
+    parent_mode: PermissionMode,
+    child_definition_mode: PermissionMode | None,
+) -> PermissionMode:
+    """子 = min(父, 子定义)。bypassPermissions > acceptEdits > ask
+    child_definition_mode=None → 直接继承父模式。"""
+
+def compute_child_allowed_tools(
+    parent_allowed: frozenset[str],
+    child_allowed_spec: list[str],
+) -> frozenset[str]:
+    """子 = 父 ∩ 子定义。["*"] 展开为父全部。"""
+
+def compute_child_disallowed_tools(
+    parent_disallowed: frozenset[str],
+    child_disallowed_spec: list[str],
+) -> frozenset[str]:
+    """子 = 父 ∪ 子定义。父禁止的，子必然禁止。"""
+```
+
+**不变量**：
+- 子 Agent **永远不能**提升自身权限（bypassPermissions → ask 方向可降不可升）
+- 子 Agent **永远不能**使用父禁止的工具
+- 子 Agent **只能**使用父子双方都允许的工具
+
+**测试覆盖** (8 个场景):
+- 子模式 = 父（None / 同等级 / bypass）
+- 子声明 bypass 但父 ask → 降级为 ask
+- 子声明 acceptEdits 但父 ask → 降级为 ask
+- 父禁止 Bash → 子 tools=["*"] → Bash 被过滤
+- 子显式禁止父允许的工具 → 并集生效
+- 子声明的工具父不允许 → 交集过滤为空
+- disallowed_tools 并集
+
+---
+
+#### 5.5 Bash AST 安全检查 (`permissions/bash_guard.py`)
+
+```python
+class BashSafetyResult(BaseModel):
+    safe: bool = True
+    warnings: list[str] = []
+    dangerous_patterns: list[dict[str, str]] = []
+    # [{"pattern": "curl_pipe_bash", "location": "(1:0–1:30)", "severity": "critical"}]
+
+def analyze_bash_command(command: str) -> BashSafetyResult:
+    """使用 tree-sitter-bash 解析命令 AST，递归遍历检测危险模式。"""
+```
+
+**依赖**: `tree-sitter>=0.24` + `tree-sitter-bash>=0.23`
+
+**危险模式检测**：
+
+| 严重度 | 模式 | 检测逻辑 |
+|--------|------|---------|
+| critical | `curl/wget ... \| bash/sh` | AST pipeline 左子树含下载器，右子树为 shell |
+| critical | `rm -rf /` 或 `rm -rf /*` | rm 命令含 -r/-f/-rf 且路径参数为 `/` / `/*` |
+| critical | 重定向覆盖系统文件到 `/dev/null` | `>` 指向 `/dev/null` 且源路径为 `/etc/*` / `~/.*` |
+| high | `chmod 777` 在系统路径 | chmod 777/0777 且路径前缀为 `/usr/` `/bin/` `/etc/` 等 |
+| high | `sudo` + 危险命令 | sudo 下执行 rm/chmod/dd/mkfs |
+| medium | `sudo` (通用) | 任何 sudo 调用 |
+| medium | `eval` + 变量引用 | eval 的参数含 `$` |
+
+**复合命令遍历**：递归 walk AST，对 `pipeline`、`command`、`file_redirect` 节点分别检查，`&&` / `;` / `$()` / 反引号中的子命令自动覆盖。
+
+**管线集成**：`run_tool_use()` 在步骤 3 中仅对 `tool.name == "Bash"` 调用，不安全时返回 `is_error=True` 的 `ToolResult`，阻止命令执行。
+
+---
+
+#### 5.6 结果持久化
+
+当 `ToolCallResult.content` 为字符串且 UTF-8 字节数超过 50KB：
+
+```
+写入路径: {tempfile.gettempdir()}/agent_core/results/{agent_id}/{timestamp}_{tool_name}_{random}.txt
+截断预览: content[:1500] + truncation notice (含文件路径)
+```
+
+使用 `aiofiles.open()` + `aiofiles.os.makedirs()` 全程异步 I/O，避免阻塞事件循环。
+
+---
+
+#### 5.7 AgentConfig 新增字段 (`models.py`)
+
+```python
+max_concurrency: int = Field(
+    default=5,
+    ge=1,
+    le=20,
+    description="Maximum number of concurrency-safe tools to execute in parallel",
+)
+```
+
+---
+
+#### 5.8 公开导出 (`agent_core/__init__.py` 增量)
+
+权限系统暂未加入公开导出（`permissions` 目前仅内部使用，由 `query/loop.py` 消费）。继承函数在 Item 7/8 实现 `run_agent()` 时随 `AgentDefinition` 一起公开。`analyze_bash_command` 可通过 `from agent_core.permissions import analyze_bash_command` 直接使用。
 
 ---
 
@@ -1306,10 +1555,11 @@ echo "prompt" | python -m agent_core  # 管道模式
 |------|------|----------|------|
 | Phase 1: 基础设施 | #1 脚手架 (2) + #2 Tool 框架 (2) + #3 多Provider集成 (3) | 7 | ✅ 已完成 |
 | Phase 2: Agent 核心循环 | #4 主循环 (4) + CLI测试入口 (1) | 5 | ✅ 已完成 |
-| Phase 2: 剩余 | #5 管线+权限 (4) + #5.5 压缩 (2) + #6 MCP (2) | 8 | ⬜ 待实现 |
+| Phase 2: 工具管线 & 权限 | #5 管线+权限系统 (4) | 4 | ✅ 已完成 |
+| Phase 2: 剩余 | #5.5 压缩 (2) + #6 MCP (2) | 4 | ⬜ 待实现 |
 | Phase 3: 子Agent & 扩展 | #7 Agent 定义 (2) + #8 执行引擎 (5) + #9 Hooks/Plugin/Skills (2) | 9 | ⬜ 待实现 |
 | Phase 4: 持久化 & 收尾 | #10 持久化 (2) + #11 测试/文档/发布 (2) | 4 | ⬜ 待实现 |
-| **总计** | **13 条目** | **33 天 (~7 周)** | 已实现 ~40% |
+| **总计** | **13 条目** | **33 天 (~7 周)** | 已实现 ~55% |
 
 ---
 
