@@ -40,7 +40,9 @@ from ..models import (
 from ..permissions.bash_guard import analyze_bash_command
 from ..permissions.engine import PermissionEngine
 from ..tools.base import ToolCallResult, ToolUseContext
-from ..tools.registry import get_tool
+from ..tools.registry import get_tool, ToolRegistry, _default_registry
+from ..mcp.client import McpSessionManager
+from ..mcp.registry import register_mcp_tools
 from .budget import estimate_tokens_from_messages, get_context_window, TokenBudget
 from .context import enrich_context
 from .truncate import hard_truncate
@@ -62,14 +64,89 @@ async def query(
     trace_id: str,
     permission_callback: PermissionCallback | None = None,
     workspace_root: str | None = None,
+    registry: ToolRegistry | None = None,
 ) -> AsyncGenerator[AgentMessage, None]:
     """Run the full agent turn loop for a single user prompt.
 
     Yields every ``AgentMessage`` (text, tool-use, tool-result, errors,
     terminal ``DoneMessage``) so that ``Agent.run()`` and
     ``Agent.stream()`` can both consume the same generator.
+
+    *registry* is an optional ``ToolRegistry`` instance.  When ``None``
+    the module-level default is used (backward compat).
     """
 
+    # ---- 0. Tool registry (query-scoped) ------------------------------------
+    if registry is None:
+        registry = _default_registry
+
+    # ---- 0b. MCP lifecycle -------------------------------------------------
+    # The session manager owns anyio cancel scopes that MUST be torn down in
+    # the same task that opened them.  Wrapping the whole turn loop in
+    # try/finally guarantees aclose() runs here on EVERY exit path (normal,
+    # early return, error, GeneratorExit) — instead of leaking sessions to
+    # asyncio.run() shutdown, where finalization runs in a different task and
+    # raises "Attempted to exit cancel scope in a different task".
+    mcp = McpSessionManager()
+    try:
+        await _bootstrap_mcp(mcp, config, registry)
+
+        async for message in _run_turns(
+            prompt=prompt,
+            config=config,
+            trace_id=trace_id,
+            permission_callback=permission_callback,
+            workspace_root=workspace_root,
+            registry=registry,
+        ):
+            yield message
+    finally:
+        await mcp.aclose()
+
+
+async def _bootstrap_mcp(
+    mcp: McpSessionManager,
+    config: AgentConfig,
+    registry: ToolRegistry,
+) -> None:
+    """Connect every configured MCP server and register its tools.
+
+    Failures are logged and skipped so one bad server never blocks the query.
+    """
+    if not config.mcp_servers:
+        return
+    for server_name, server_config in config.mcp_servers.items():
+        try:
+            state = await mcp.connect(server_name, server_config)
+            if state.connection_error is None:
+                register_mcp_tools(registry, server_name, state)
+            else:
+                logger.warning(
+                    "MCP server '%s' unavailable (%s) — continuing without it",
+                    server_name,
+                    state.connection_error,
+                )
+        except Exception as exc:
+            logger.warning(
+                "MCP bootstrap error for '%s' (skipping): %s",
+                server_name,
+                exc,
+            )
+
+
+async def _run_turns(
+    prompt: str,
+    config: AgentConfig,
+    trace_id: str,
+    permission_callback: PermissionCallback | None,
+    workspace_root: str | None,
+    registry: ToolRegistry,
+) -> AsyncGenerator[AgentMessage, None]:
+    """Run the agent turn loop.
+
+    MCP ownership lives in :func:`query`; this generator never touches the
+    session manager, so its many early-return paths are safe.
+    """
     # ---- 1. Initialisation (runs once) -------------------------------------
     system = await enrich_context(workspace_root)
 
@@ -87,7 +164,9 @@ async def query(
 
     model_id = config.model_id
     client = get_client(model_id, config)
-    tools_schema = client.__class__.convert_tools(config.tools)
+    tools_schema = client.__class__.convert_tools(
+        config.tools, registry=registry
+    )
 
     permission_engine = PermissionEngine.from_config(
         permission_mode=config.permission_mode,
@@ -285,6 +364,7 @@ async def query(
             permission_callback=permission_callback,
             permission_engine=permission_engine,
             max_concurrency=config.max_concurrency,
+            registry=registry,
         )
         for tr in tool_results:
             yield tr
@@ -374,6 +454,7 @@ async def run_tools(
     permission_callback: PermissionCallback | None = None,
     permission_engine: PermissionEngine | None = None,
     max_concurrency: int = 5,
+    registry: ToolRegistry | None = None,
 ) -> list[ToolResult]:
     """Execute a batch of tool-use requests with concurrency orchestration.
 
@@ -384,16 +465,19 @@ async def run_tools(
     **Signature** — compatible replacement for the old
     ``_execute_tools_sequential``.
     """
+    if registry is None:
+        registry = _default_registry
+
     # Fast path: single tool — no concurrency overhead
     if len(tool_uses) == 1:
         tu = tool_uses[0]
-        return [await run_tool_use(tu, context, permission_callback, permission_engine)]
+        return [await run_tool_use(tu, context, permission_callback, permission_engine, registry)]
 
     results: dict[int, ToolResult] = {}
     pending_batch: list[tuple[int, ToolUse]] = []
 
     for idx, tu in enumerate(tool_uses):
-        is_concurrent = _tool_is_concurrency_safe(tu.tool_name)
+        is_concurrent = _tool_is_concurrency_safe(tu.tool_name, registry)
 
         if is_concurrent:
             pending_batch.append((idx, tu))
@@ -402,20 +486,20 @@ async def run_tools(
             if pending_batch:
                 batch_results = await _run_concurrent_batch(
                     pending_batch, context, permission_callback,
-                    permission_engine, max_concurrency,
+                    permission_engine, max_concurrency, registry,
                 )
                 results.update(batch_results)
                 pending_batch.clear()
             # Execute serial tool
             results[idx] = await run_tool_use(
-                tu, context, permission_callback, permission_engine,
+                tu, context, permission_callback, permission_engine, registry,
             )
 
     # Flush remaining concurrent batch
     if pending_batch:
         batch_results = await _run_concurrent_batch(
             pending_batch, context, permission_callback,
-            permission_engine, max_concurrency,
+            permission_engine, max_concurrency, registry,
         )
         results.update(batch_results)
 
@@ -427,6 +511,7 @@ async def run_tool_use(
     context: ToolUseContext,
     permission_callback: PermissionCallback | None = None,
     permission_engine: PermissionEngine | None = None,
+    registry: ToolRegistry | None = None,
 ) -> ToolResult:
     """Execute a single tool-use through its 7-step lifecycle:
 
@@ -438,9 +523,12 @@ async def run_tool_use(
     6. execute   — ``tool.call()``
     7. persist   — large results → temp file, truncated preview
     """
+    if registry is None:
+        registry = _default_registry
+
     # ---- 1. resolve ---------------------------------------------------------
     try:
-        tool = get_tool(tool_use.tool_name)
+        tool = registry.get(tool_use.tool_name)
     except KeyError:
         return ToolResult(
             tool_use_id=tool_use.tool_use_id,
@@ -524,10 +612,12 @@ async def run_tool_use(
 # ---- internal helpers -------------------------------------------------------
 
 
-def _tool_is_concurrency_safe(tool_name: str) -> bool:
+def _tool_is_concurrency_safe(tool_name: str, registry: ToolRegistry | None = None) -> bool:
     """Check ``is_concurrency_safe`` without instantiating the tool."""
+    if registry is None:
+        registry = _default_registry
     try:
-        tool = get_tool(tool_name)
+        tool = registry.get(tool_name)
     except KeyError:
         return True  # unknown tools fail fast; safe to treat as concurrent
     return tool.is_concurrency_safe
@@ -539,6 +629,7 @@ async def _run_concurrent_batch(
     permission_callback: PermissionCallback | None,
     permission_engine: PermissionEngine | None,
     max_concurrency: int,
+    registry: ToolRegistry | None = None,
 ) -> dict[int, ToolResult]:
     """Execute a batch of concurrency-safe tools in parallel."""
     sem = asyncio.Semaphore(max_concurrency)
@@ -546,7 +637,7 @@ async def _run_concurrent_batch(
     async def _one(idx: int, tu: ToolUse) -> tuple[int, ToolResult]:
         async with sem:
             result = await run_tool_use(
-                tu, context, permission_callback, permission_engine,
+                tu, context, permission_callback, permission_engine, registry,
             )
         return idx, result
 

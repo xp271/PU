@@ -152,10 +152,19 @@ class OpenAIClient(BaseClient):
         return openai_messages
 
     @classmethod
-    def convert_tools(cls, allowed_tools: list[str]) -> list[dict[str, Any]]:
-        """Generate OpenAI Chat Completions API ``tools`` parameter format."""
+    def convert_tools(
+        cls,
+        allowed_tools: list[str],
+        registry: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Generate OpenAI Chat Completions API ``tools`` parameter format.
+
+        *registry* is an optional ``ToolRegistry`` instance.  When
+        ``None`` the module-level default is used (backward compat).
+        """
+        source = registry.registered_tools() if registry is not None else registered_tools()
         tools: list[dict[str, Any]] = []
-        for name, tool_cls in registered_tools().items():
+        for name, tool_cls in source.items():
             if "*" not in allowed_tools and name not in allowed_tools:
                 continue
             tools.append({

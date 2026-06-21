@@ -117,9 +117,15 @@ class BaseClient(ABC):
 
     @classmethod
     def convert_tools(
-        cls, allowed_tools: list[str]
+        cls,
+        allowed_tools: list[str],
+        registry: Any = None,
     ) -> list[dict[str, Any]]:
-        """Build a ``tools`` parameter list in provider-native format."""
+        """Build a ``tools`` parameter list in provider-native format.
+
+        *registry* is a ``ToolRegistry`` instance.  When ``None`` the
+        provider falls back to the module-level default (backward compat).
+        """
         raise NotImplementedError
 
     @classmethod

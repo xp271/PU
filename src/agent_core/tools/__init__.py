@@ -5,7 +5,7 @@ from .file_read import FileReadTool
 from .file_write import FileWriteTool
 from .glob_tool import GlobTool
 from .grep_tool import GrepTool
-from .registry import get_tool, register_tool, registered_tools
+from .registry import get_tool, register_tool, registered_tools, ToolRegistry
 
 __all__ = [
     "BashTool",
@@ -16,6 +16,7 @@ __all__ = [
     "GrepTool",
     "Tool",
     "ToolCallResult",
+    "ToolRegistry",
     "ToolUseContext",
     "get_tool",
     "register_tool",

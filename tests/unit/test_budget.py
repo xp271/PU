@@ -160,3 +160,72 @@ class TestTokenBudget:
         tb.record_turn(1, input_tokens=100, output_tokens=50)
         tb.record_turn(2, input_tokens=200, output_tokens=80)
         assert tb.total_tokens() == 430
+
+    def test_known_deepseek_model_context_window(self) -> None:
+        mid = ModelId(ModelProvider.DEEPSEEK, "deepseek-v4-pro")
+        assert get_context_window(mid) == 128_000
+
+    def test_known_openai_gpt41_context_window(self) -> None:
+        mid = ModelId(ModelProvider.OPENAI, "gpt-4.1-mini")
+        assert get_context_window(mid) == 1_000_000
+
+    def test_diminishing_returns_window_only_keeps_last_three(self) -> None:
+        """After 5 turns, only the most recent 3 deltas are tracked."""
+        tb = TokenBudget(max_turns=20, context_window=200_000)
+        # Turn 1-2: large output
+        tb.record_turn(1, input_tokens=100, output_tokens=1000)
+        tb.record_turn(2, input_tokens=100, output_tokens=1000)
+        # Turn 3-5: small output
+        tb.record_turn(3, input_tokens=100, output_tokens=10)
+        tb.record_turn(4, input_tokens=100, output_tokens=10)
+        tb.record_turn(5, input_tokens=100, output_tokens=10)
+        # The window should now contain deltas from turns 3-4-5 (all small)
+        assert tb.diminishing_returns()  # all < 500
+
+    def test_diminishing_returns_reset_on_tool_use(self) -> None:
+        """After tool use, diminishing returns check resets."""
+        tb = TokenBudget(max_turns=20, context_window=200_000)
+        tb.record_turn(1, input_tokens=100, output_tokens=10)
+        tb.record_turn(2, input_tokens=100, output_tokens=10)
+        # Not enough data yet (only 2 turns)
+        assert not tb.diminishing_returns()
+        tb.reset_diminishing_returns()
+        # After reset, window should be empty
+        assert not tb.diminishing_returns()
+
+    def test_needs_truncation_at_exact_threshold(self) -> None:
+        tb = TokenBudget(max_turns=20, context_window=200_000)
+        threshold = tb.truncation_threshold  # 160_000
+        # At exactly the threshold
+        assert not tb.needs_truncation(threshold)
+        # One more
+        assert tb.needs_truncation(threshold + 1)
+
+    def test_estimate_tokens_with_mixed_unknown_blocks(self) -> None:
+        """Blocks with unknown types should still be counted."""
+        msgs = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "unknown_type", "data": "some data here"},
+                ],
+            }
+        ]
+        est = estimate_tokens_from_messages(msgs)
+        assert est > 0  # fallback: str(block) for unknown types
+
+    def test_estimate_tokens_with_nested_content(self) -> None:
+        """Nested content structures are recursively counted."""
+        msgs = [
+            {
+                "role": "user",
+                "content": "plain string",
+            }
+        ]
+        est = estimate_tokens_from_messages(msgs)
+        assert est == len("plain string") // 4
+
+    def test_estimate_tokens_with_empty_content(self) -> None:
+        msgs = [{"role": "user", "content": []}]
+        est = estimate_tokens_from_messages(msgs)
+        assert est == 0

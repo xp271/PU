@@ -11,3 +11,6 @@ wheels/
 
 # Local agent-core config (contains API keys)
 agent-core.config.json
+
+# Playwright MCP runtime output (console logs + page snapshots)
+.playwright-mcp/

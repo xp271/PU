@@ -163,6 +163,73 @@ class CompressionConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# MCP configuration models
+# ---------------------------------------------------------------------------
+
+
+class McpServerTransport(str, Enum):
+    STDIO = "stdio"
+    SSE = "sse"
+    WEBSOCKET = "websocket"
+
+
+class McpOAuthConfig(BaseModel):
+    """OAuth 2.0 / 2.1 configuration for MCP server authentication."""
+
+    client_id: str
+    client_secret: str | None = None
+    authorization_url: str | None = None
+    token_url: str
+    scopes: list[str] = Field(default_factory=list)
+    redirect_uri: str | None = None
+    device_code_url: str | None = None
+
+    # -- runtime token storage --
+    token: str | None = None
+    refresh_token: str | None = None
+    expires_at: float | None = None
+
+    # -- JWT metadata validation --
+    audience: str | None = None
+    issuer: str | None = None
+
+
+class McpServerConfig(BaseModel):
+    """Configuration for a single MCP server connection."""
+
+    transport: McpServerTransport = McpServerTransport.STDIO
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    url: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    cwd: str | None = None
+
+    # -- OAuth --
+    auth: McpOAuthConfig | None = None
+
+    # -- Tool filtering (optional) --
+    include_tools: list[str] | None = None
+    exclude_tools: list[str] | None = None
+
+    # -- Connection management --
+    connect_timeout: float = 30.0
+    request_timeout: float = 60.0
+    max_reconnect_attempts: int = 3
+    reconnect_delay: float = 2.0
+
+    @model_validator(mode="after")
+    def _validate_transport_fields(self) -> "McpServerConfig":
+        if self.transport == McpServerTransport.STDIO:
+            if not self.command:
+                raise ValueError("'command' is required for stdio transport")
+        elif self.transport in (McpServerTransport.SSE, McpServerTransport.WEBSOCKET):
+            if not self.url:
+                raise ValueError("'url' is required for sse/websocket transport")
+        return self
+
+
+# ---------------------------------------------------------------------------
 # AgentConfig
 # ---------------------------------------------------------------------------
 
@@ -180,7 +247,7 @@ class AgentConfig(BaseModel):
         default_factory=lambda: ["*"],
         description="List of tool names available to the agent",
     )
-    mcp_servers: dict[str, Any] = Field(
+    mcp_servers: dict[str, McpServerConfig] = Field(
         default_factory=dict,
         description="MCP server configurations keyed by server name",
     )

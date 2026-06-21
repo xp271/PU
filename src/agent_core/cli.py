@@ -30,12 +30,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 from .agent import Agent
-from .models import AgentConfig, ModelProvider
+from .mcp.client import McpSessionManager
+from .models import AgentConfig, ModelId, ModelProvider
 
 # ---------------------------------------------------------------------------
 # Config file resolution
@@ -49,20 +51,94 @@ _ENV_VAR_MAP: dict[str, str] = {
 
 
 def _find_config_file() -> Path | None:
-    """Locate the first existing config file in priority order."""
+    """Locate the first existing config file in priority order.
+
+    1. ``$AGENT_CORE_CONFIG`` environment variable (absolute path)
+    2. ``./agent-core.config.json`` (current working directory)
+    3. ``{package_root}/agent-core.config.json`` (resolved via ``__file__``;
+       works for editable installs where the package lives inside the project)
+    4. ``~/.agent-core/config.json`` (user home)
+    """
     candidates: list[Path] = []
 
     override = os.environ.get("AGENT_CORE_CONFIG")
     if override:
-        candidates.append(Path(override))
+        candidates.append(Path(override).expanduser().resolve())
 
-    candidates.append(Path("agent-core.config.json"))
+    candidates.append(Path("agent-core.config.json").resolve())
+
+    # Search relative to the package install location.
+    # For editable installs (``pip install -e .``) this resolves to the
+    # project root (e.g. ``C:\\PU``).  For regular installs it falls
+    # through silently when no config is found.
+    _pkg_root = Path(__file__).resolve().parent.parent.parent
+    candidates.append(_pkg_root / "agent-core.config.json")
+
     candidates.append(Path.home() / ".agent-core" / "config.json")
 
     for p in candidates:
         if p.is_file():
             return p
     return None
+
+
+# -- MCP config loading helpers ----------------------------------------------
+
+
+_ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env_vars(obj: Any) -> Any:
+    """Recursively expand ``${ENV_VAR}`` placeholders."""
+
+    def _sub(m: Any) -> str:
+        var = m.group(1)
+        if var not in os.environ:
+            raise KeyError(
+                f"Environment variable '{var}' referenced in .mcp.json is not set"
+            )
+        return os.environ[var]
+
+    if isinstance(obj, str):
+        return _ENV_PLACEHOLDER.sub(_sub, obj)
+    if isinstance(obj, list):
+        return [_expand_env_vars(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _expand_env_vars(v) for k, v in obj.items()}
+    return obj
+
+
+def _load_mcp_servers_raw() -> dict[str, Any]:
+    """Load MCP servers from file chain: ~/.agent/mcp.json → .mcp.json."""
+    servers: dict[str, Any] = {}
+
+    # 1. User-level
+    user_mcp = Path.home() / ".agent" / "mcp.json"
+    if user_mcp.is_file():
+        try:
+            raw = json.loads(user_mcp.read_text(encoding="utf-8"))
+            servers.update(raw.get("mcpServers", {}))
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[config] failed to read {user_mcp}: {exc}", file=sys.stderr)
+
+    # 2. Project-level (overrides same-named entries)
+    project_mcp = Path(".mcp.json").resolve()
+    if project_mcp.is_file():
+        try:
+            raw = json.loads(project_mcp.read_text(encoding="utf-8"))
+            servers.update(raw.get("mcpServers", {}))
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[config] failed to read {project_mcp}: {exc}", file=sys.stderr)
+
+    # Expand ${ENV_VAR} placeholders
+    try:
+        expanded = _expand_env_vars(servers)
+        if isinstance(expanded, dict):
+            servers = expanded
+    except KeyError as exc:
+        print(f"[config] {exc}", file=sys.stderr)
+
+    return servers
 
 
 def _load_config() -> AgentConfig:
@@ -92,11 +168,37 @@ def _load_config() -> AgentConfig:
     max_turns: int = raw.get("max_turns", 20)
     permission_mode: str = raw.get("permission_mode", "bypassPermissions")
 
+    # -- MCP servers: code injection in config > .mcp.json files --
+    mcp_servers: dict[str, Any] = {}
+    try:
+        mcp_servers = _load_mcp_servers_raw()
+    except Exception as exc:
+        print(f"[config] MCP config load failed: {exc}", file=sys.stderr)
+    # Code injection overrides file-based config
+    mcp_servers.update(raw.get("mcp_servers", {}))
+
+    # -- Guard: refuse to start with no credentials at all --
+    if not any(api_keys.values()):
+        provider = ModelId.parse(model).provider.value
+        if not api_keys.get(provider):
+            env_var = _ENV_VAR_MAP.get(provider, f"{provider.upper()}_API_KEY")
+            print(
+                f"[config] ERROR: No API key found for provider '{provider}'.\n"
+                f"  Searched: {config_path or 'no config file found'}\n"
+                f"  Env var:  {env_var} (not set)\n"
+                f"\n"
+                f"  Fix: set the {env_var} environment variable, or create\n"
+                f"  ~/.agent-core/config.json with an api_keys.{provider} entry.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     return AgentConfig(
         model=model,
         api_keys=api_keys,
         max_turns=max_turns,
         permission_mode=permission_mode,  # type: ignore[arg-type]
+        mcp_servers=mcp_servers,  # type: ignore[arg-type]
     )
 
 
@@ -175,8 +277,9 @@ async def _repl(config: AgentConfig) -> None:
 
         # -- Run agent with current prompt --
         agent = Agent(config)
+        stream = agent.stream(prompt)
         try:
-            async for msg in agent.stream(prompt):
+            async for msg in stream:
                 if msg.type == "assistant_text":
                     print(msg.content, end="", flush=True)
                 elif msg.type == "tool_use":
@@ -197,6 +300,11 @@ async def _repl(config: AgentConfig) -> None:
             print("\n[cancelled]")
         except Exception as exc:
             print(f"\n[exception] {type(exc).__name__}: {exc}")
+        finally:
+            # Close the stream (and its MCP sessions) in THIS task, even if the
+            # loop was abandoned via exception — never at asyncio.run() shutdown
+            # in a different task (anyio cancel-scope requirement).
+            await stream.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -221,13 +329,60 @@ def _ellipsis(text: str, max_len: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# MCP startup preflight
+# ---------------------------------------------------------------------------
+
+async def _preflight_mcp(config: AgentConfig) -> None:
+    """Connect to every configured MCP server once, at startup.
+
+    This triggers any ``npx -y`` package download and verifies the
+    handshake *before* the REPL accepts input — so the first real query
+    isn't blocked on a cold download, and an unreachable/broken server
+    surfaces immediately instead of mid-query.
+
+    Sessions are closed again right away: each ``query()`` opens its own
+    (the manager is query-scoped, and connect/aclose must run in the same
+    task).  The win here is warming the npx cache + reporting status.
+    ``connect()`` and ``aclose()`` run in this single ``asyncio.run`` task,
+    satisfying the anyio same-task requirement.
+    """
+    if not config.mcp_servers:
+        return
+
+    print(f"[mcp] checking {len(config.mcp_servers)} server(s)…")
+    mcp = McpSessionManager()
+    try:
+        for name, server_config in config.mcp_servers.items():
+            try:
+                state = await mcp.connect(name, server_config)
+            except Exception as exc:  # defensive: never block startup
+                print(f"[mcp]   x {name}: {exc}", file=sys.stderr)
+                continue
+            if state.connection_error is None:
+                print(f"[mcp]   ok {name}: {len(state.tools)} tool(s)")
+            else:
+                print(
+                    f"[mcp]   x {name}: {state.connection_error}",
+                    file=sys.stderr,
+                )
+    finally:
+        await mcp.aclose()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+async def _main(config: AgentConfig) -> None:
+    """Async entry: preflight MCP servers, then run the REPL."""
+    await _preflight_mcp(config)
+    await _repl(config)
+
 
 def main() -> None:
     """CLI entry point (agent-core console script)."""
     config = _load_config()
-    asyncio.run(_repl(config))
+    asyncio.run(_main(config))
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ from agent_core.tools import (
     register_tool,
     registered_tools,
 )
-from agent_core.tools.registry import _registry as _raw_registry
+from agent_core.tools.registry import _default_registry as _default
 
 
 @pytest.mark.registry
@@ -30,8 +30,8 @@ class TestToolRegistry:
             def input_schema(cls):
                 return {"type": "object"}
 
-        assert "TestRegistry" in _raw_registry
-        assert _raw_registry["TestRegistry"] is _TestTool
+        assert "TestRegistry" in _default._registry
+        assert _default._registry["TestRegistry"] is _TestTool
 
     def test_register_tool_requires_name(self) -> None:
         with pytest.raises(TypeError, match="must define a 'name'"):
