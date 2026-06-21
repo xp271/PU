@@ -56,7 +56,9 @@ class MockClient(BaseClient):
         return (system, messages)
 
     @classmethod
-    def convert_tools(cls, allowed_tools: list[str]) -> list[dict[str, Any]]:
+    def convert_tools(
+        cls, allowed_tools: list[str], registry: Any = None
+    ) -> list[dict[str, Any]]:
         return []
 
     @classmethod

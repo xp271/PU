@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import aclosing
 from typing import Any
 
 from .models import AgentConfig, AgentMessage, AgentResult, StopReason
@@ -53,10 +54,17 @@ class Agent:
         )
 
     async def stream(self, prompt: str) -> AsyncGenerator[AgentMessage, None]:
-        async for message in query(
-            prompt=prompt,
-            config=self._config,
-            trace_id=self._trace_id,
-            permission_callback=self._permission_callback,
-        ):
-            yield message
+        # ``aclosing`` guarantees the inner ``query`` generator is closed in
+        # *this* task even if the consumer abandons us mid-stream — so MCP
+        # teardown (query's finally) never runs at event-loop shutdown in a
+        # different task (anyio cancel-scope requirement).
+        async with aclosing(
+            query(
+                prompt=prompt,
+                config=self._config,
+                trace_id=self._trace_id,
+                permission_callback=self._permission_callback,
+            )
+        ) as stream:
+            async for message in stream:
+                yield message

@@ -70,11 +70,44 @@ class TestClassifyError:
             == "fatal"
         )
 
+    def test_413_is_context_length(self) -> None:
+        assert (
+            DeepSeekClient.classify_error(_make_status_error(413))
+            == "context_length"
+        )
+
+    def test_400_with_context_is_context_length(self) -> None:
+        """400 with 'context' in message should be context_length."""
+        err = openai.APIStatusError(
+            message="context window exceeded",
+            body={"error": {"message": "context window exceeded"}},
+            response=httpx.Response(
+                status_code=400,
+                request=httpx.Request("POST", "https://api.deepseek.com/chat/completions"),
+            ),
+        )
+        assert DeepSeekClient.classify_error(err) == "context_length"
+
+    def test_400_with_content_filter_is_content_filter(self) -> None:
+        err = openai.APIStatusError(
+            message="content_filter violation",
+            body={"error": {"message": "content_filter violation"}},
+            response=httpx.Response(
+                status_code=400,
+                request=httpx.Request("POST", "https://api.deepseek.com/chat/completions"),
+            ),
+        )
+        assert DeepSeekClient.classify_error(err) == "content_filter"
+
     def test_non_api_error_is_transient(self) -> None:
         assert (
             DeepSeekClient.classify_error(ValueError("something"))
             == "transient"
         )
+
+    def test_other_4xx_is_fatal(self) -> None:
+        assert DeepSeekClient.classify_error(_make_status_error(404)) == "fatal"
+        assert DeepSeekClient.classify_error(_make_status_error(422)) == "fatal"
 
 
 # ---------------------------------------------------------------------------

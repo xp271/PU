@@ -1096,8 +1096,9 @@ echo "prompt" | python -m agent_core  # 管道模式
 | `src/agent_core/permissions/rules.py` | `PermissionRule` Pydantic 模型 + `default_rules()` |
 | `src/agent_core/permissions/inheritance.py` | 子 Agent 权限继承 3 个纯函数合约 |
 | `src/agent_core/permissions/bash_guard.py` | `analyze_bash_command()` + `BashSafetyResult` |
-| `tests/unit/test_permissions.py` | 41 个单元测试（引擎 + 继承 + bash guarded） |
-| `tests/unit/test_loop_helpers.py` | 工具管线集成测试（更新为 `run_tools` / `run_tool_use`） |
+| `tests/unit/test_permissions.py` | 单元测试：PermissionEngine 引擎 (23) + 子Agent权限继承 (6) + Bash AST 安全检查 (22) |
+| `tests/unit/test_loop_helpers.py` | 消息构建器 + `run_tool_use` / `run_tools` 工具管线的集成测试 |
+| `tests/unit/test_tools_edge_cases.py` | 工具执行管线边界测试：混合并发/串行编排、`_persist_large_result`、设备文件检测、`async_atomic_write` 错误清理 |
 
 ---
 
@@ -1365,20 +1366,368 @@ max_concurrency: int = Field(
 
 ---
 
-### 5.5 自动压缩 (上下文超限 LLM 摘要) (2 天)
+### 5.5 自动压缩 (上下文超限 LLM 摘要) — 已实现
 
-**功能**: 上下文接近窗口上限时触发 LLM 摘要压缩，保留关键信息的同时减小上下文体积。
+**功能**: 上下文接近窗口上限时优先用 LLM 摘要压缩旧轮次，压缩失败才回退到硬截断，保留关键信息的同时减小上下文体积。
 
-**原因**: 从主循环中拆分出来独立开发。压缩的摘要质量、保留策略、压缩后的 tool_result 一致性是独立的设计问题，单独迭代可以稳步打磨而不影响主循环稳定性。
+**实现文件**:
 
-- [ ] 触发条件：总 token 超过模型 context_window 的 85% 或 AgentConfig 中配置的阈值
-- [ ] 摘要策略：
-  - 保留最近 N 轮原始消息（N 可配置，默认 3）
-  - 更早的对话压缩为一段 `<conversation_summary>` user message
-  - tool_result 压缩：保留 tool_use 名称 + 输入参数 + 结果摘要（前 200 字符），截断大结果
-- [ ] 压缩调用：用独立的一次 `query()` 调用让 LLM 生成摘要（不计入 max_turns）
-- [ ] 压缩后一致性验证：压缩前后 system prompt 不变，tool_use 列表可追溯
-- [ ] 压缩事件通知：yield `AgentMessage(type="compact")` 让调用方可感知
+| 文件 | 职责 |
+|------|------|
+| `src/agent_core/compression/__init__.py` | 模块公开导出 |
+| `src/agent_core/compression/trigger.py` | `_partition_rounds()` 共享轮次分区 + `can_compress()` 可压缩性判断 |
+| `src/agent_core/compression/summarizer.py` | `compress()` 核心：提示词构建 + 重试循环 + LLM 调用 + 消息重组 |
+| `src/agent_core/compression/consistency.py` | `verify_compression()` 4 项一致性检查 |
+| `src/agent_core/compression/prompts.py` | 可自定义的 prompt 模板常量 |
+| `src/agent_core/models.py` | `CompressionConfig` + `CompactMessage` 数据模型 |
+| `src/agent_core/query/loop.py` | 主循环集成：压缩优先 → 截断兜底 |
+| `src/agent_core/query/truncate.py` | 复用 `_partition_rounds()` 替代内联分区逻辑 |
+| `src/agent_core/__init__.py` | 导出 `CompactMessage`、`CompressionConfig` |
+
+**测试文件**:
+
+| 文件 | 说明 |
+|------|------|
+| `tests/unit/test_compression.py` | 21 个单元测试（触发条件、分区、提示词构建、一致性验证、重试逻辑、配置校验、数据模型） |
+| `tests/integration/test_compression.py` | 9 个 MockClient 集成测试（含重试成功/耗尽/禁用/轮次不足等场景） |
+| `tests/e2e/test_compression.py` | vcrpy 录制回放测试（端到端压缩触发流程） |
+
+---
+
+#### 5.5.1 压缩在 `query()` 主循环中的位置
+
+压缩和截断共享同一个触发阈值（context window × 0.8，由 `TokenBudget.truncation_threshold` 定义）。到达阈值时**总是先尝试压缩**，仅在以下情况回退到硬截断：
+
+1. `CompressionConfig.enabled = False`（用户主动关闭）
+2. 轮次太少没有可压缩的旧轮次
+3. 压缩失败且所有重试耗尽
+
+```
+query() 主循环中的压缩块:
+
+  estimated = estimate_tokens_from_messages(messages, system)
+
+  if budget.needs_truncation(estimated):            ← 统一 80% 阈值
+      if can_compress(messages, config.compression):
+          yield CompactMessage(status="started")     ← 事件通知
+          try:
+              messages, summary = await compress(...) ← 优先压缩
+              re-estimate
+          except CompressionError:
+              messages = hard_truncate(...)          ← 失败 → 截断兜底
+      else:
+          messages = hard_truncate(...)              ← 不可用 → 直接截断
+  → 继续 LLM 调用
+```
+
+**行为矩阵**（统一阈值 = context_window × 0.8）：
+
+| 场景 | 阈值触发 | 压缩 | 截断 | 结果 |
+|------|---------|------|------|------|
+| tokens < 0.8×CW | No | — | No | 无操作 |
+| tokens ≥ 0.8×CW | Yes | — | — | 进入处理流程 |
+| ├ 压缩已启用 + 有旧轮次 | — | 尝试 | — | 压缩优先 |
+| │ ├ 验证一次通过 | — | 成功 | No | 仅压缩 |
+| │ ├ 验证失败 → 重试通过 | — | 成功 | No | 压缩（含重试） |
+| │ ├ 重试全部耗尽 | — | 失败 | Yes | 回退截断 |
+| │ └ 压缩成功但仍 > 0.8×CW | — | 成功 | Yes | 压缩 + 截断 |
+| └ 压缩禁用 或 轮次太少 | — | 跳过 | Yes | 直接截断 |
+
+**设计要点**：
+- **统一入口**：压缩和截断由 `budget.needs_truncation()`（80% 阈值）统一触发，不存在"80–85% 区间绕过压缩"的窗口
+- **压缩优先**：到达阈值后，只要压缩可用，总是先尝试压缩
+- **截断兜底**：压缩不可用、压缩失败、或压缩后仍超限时，截断作为最终保障
+- 关闭压缩（`enabled=False`）时行为完全回退到仅截断模式
+
+---
+
+#### 5.5.2 数据模型
+
+##### `CompressionConfig` (`models.py`)
+
+```python
+class CompressionConfig(BaseModel):
+    enabled: bool = True
+    keep_recent_rounds: int = 3
+    summary_max_tokens: int = 2048
+    tool_result_preview_chars: int = 200
+    max_retries: int = 2
+    prompt_template: str | None = None
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | `bool` | `True` | 启用自动压缩（关闭时到达截断阈值直接硬截断） |
+| `keep_recent_rounds` | `int` (1–10) | `3` | 保留不压缩的最近 N 轮完整对话 |
+| `summary_max_tokens` | `int` (512–8192) | `2048` | LLM 摘要响应的最大 token 数 |
+| `tool_result_preview_chars` | `int` (50–500) | `200` | 压缩提示中每个 tool_result 的截断预览字符数 |
+| `max_retries` | `int` (0–5) | `2` | 压缩验证失败时的最大重试次数；0 表示失败直接回退到截断 |
+| `prompt_template` | `str \| None` | `None` | 自定义压缩请求提示词模板，必须包含 `{preview_chars}` 和 `{conversation_text}` 占位符；`None` 时使用内置模板 |
+
+**AgentConfig 集成**：
+
+```python
+class AgentConfig(BaseModel):
+    # ... 其他字段 ...
+    compression: CompressionConfig = Field(
+        default_factory=CompressionConfig,
+        description="Auto-compression configuration",
+    )
+```
+
+##### `CompactMessage` (`models.py`)
+
+压缩事件通知消息，`AgentMessage` discriminated union 的第 6 个变体。
+
+```python
+class CompactMessage(BaseModel):
+    type: Literal["compact"] = "compact"
+    status: Literal["started", "completed", "skipped"]
+    rounds_compressed: int = 0
+    rounds_preserved: int = 0
+    tokens_before: int = 0
+    tokens_after: int = 0
+    compression_ratio: float = 0.0
+    summary: str | None = None
+    retries_used: int = 0
+    error_detail: str | None = None
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `type` | `"compact"` | 消息类型标识 |
+| `status` | `"started"` \| `"completed"` \| `"skipped"` | 压缩阶段：开始 / 完成 / 跳过 |
+| `rounds_compressed` | `int` | 被压缩的轮次数 |
+| `rounds_preserved` | `int` | 保留不压缩的轮次数 |
+| `tokens_before` | `int` | 压缩前估算 token 数 |
+| `tokens_after` | `int` | 压缩后估算 token 数（`skipped` 时为 0） |
+| `compression_ratio` | `float` | `tokens_after / tokens_before`（`skipped` 时为 0.0） |
+| `summary` | `str \| None` | 生成的摘要文本（仅 `completed` 时有值） |
+| `retries_used` | `int` | 实际重试次数（0 表示一次通过） |
+| `error_detail` | `str \| None` | 失败原因（仅 `skipped` 时有值） |
+
+`CompactMessage` 是 `AgentMessage` 联合类型的非破坏性扩展——调用方不匹配此变体时自动忽略，完全向后兼容。
+
+```python
+AgentMessage = Annotated[
+    AssistantText | ToolUse | ToolResult | ErrorMessage | DoneMessage | CompactMessage,
+    Field(discriminator="type"),
+]
+```
+
+---
+
+#### 5.5.3 压缩触发条件 (`compression/trigger.py`)
+
+```python
+def _partition_rounds(messages: list[dict]) -> list[list[dict]]:
+    """按 role="user" 边界分区。被 hard_truncate 和 compress 共享使用。"""
+
+def can_compress(messages: list[dict], config: CompressionConfig) -> bool:
+    """可压缩性判断。不检查阈值——阈值由 budget.needs_truncation() 统一负责。"""
+```
+
+**`can_compress()` 返回 True 的条件**：
+1. `config.enabled == True`
+2. 轮次数 > `config.keep_recent_rounds`（存在可压缩的旧轮次）
+
+**`_partition_rounds()` 分区规则**：
+- 以 `role: "user"` 为轮次边界
+- 每个轮次包含一个 user 消息 + 后续零或多个 assistant 消息
+- tool_result user 消息同样触发新轮次分界
+
+---
+
+#### 5.5.4 压缩函数 (`compression/summarizer.py`)
+
+```python
+async def compress(
+    client,       # BaseClient 实例（duck-typed 避免循环导入）
+    messages: list[dict[str, Any]],
+    system: str | None,
+    model_id: ModelId,
+    config: CompressionConfig,
+) -> tuple[list[dict[str, Any]], str, list[CompressionAttempt]]:
+```
+
+**参数**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `client` | `BaseClient` | 已实例化的 LLM 客户端，用于生成摘要 |
+| `messages` | `list[dict]` | 完整消息列表（Anthropic content-block 格式） |
+| `system` | `str \| None` | System 提示词（原样传给摘要 LLM 调用） |
+| `model_id` | `ModelId` | 当前使用的模型标识 |
+| `config` | `CompressionConfig` | 压缩调参 |
+
+**返回值**: `(compressed_messages, summary, attempts)`
+- `compressed_messages`: 压缩后的消息列表 = `[摘要消息] + recent_rounds` 展开
+- `summary`: 生成的摘要文本
+- `attempts`: 所有尝试记录（含 token 消耗和验证结果）
+
+**异常**: 所有重试耗尽后抛出 `CompressionError(Exception)`
+
+**算法流程**：
+
+```
+1. _partition_rounds(messages) → rounds
+2. old_rounds  = rounds[:-keep_recent_rounds]
+   recent_rounds = rounds[-keep_recent_rounds:]
+3. 如果 old_rounds 为空 → 返回原列表（无事可压缩）
+4. 重试循环 (最多 max_retries + 1 次尝试):
+   a. 渲染 old_rounds 为 conversation_text（每轮格式：[Round N] role: text / tool_use / tool_result）
+   b. 用 COMPRESSION_REQUEST 模板 + conversation_text 构建提示词
+   c. 调用 LLM 生成摘要（无 tools，max_tokens=summary_max_tokens）
+   d. 组装 compressed = [summary_msg] + recent_rounds
+   e. verify_compression(...) 验证一致性
+   f. 验证通过 → 返回 (compressed, summary, attempts)
+   g. 验证不通过 → previous_errors 注入 RETRY_FEEDBACK 模板 → 重试
+5. 重试耗尽 → 抛出 CompressionError
+```
+
+**摘要消息格式**：
+
+```xml
+<conversation_summary>
+{LLM 生成的摘要}
+</conversation_summary>
+
+The above is a summary of earlier conversation rounds.
+The following rounds are the most recent unsummarized conversation.
+```
+
+**重试反馈格式**（仅当上一次验证失败时追加到提示词末尾）：
+
+```xml
+<previous_attempt_feedback>
+Your previous summarization was rejected because:
+- {验证错误信息}
+
+Please fix these issues in your new summary.
+</previous_attempt_feedback>
+```
+
+##### 内部数据类型
+
+**`CompressionAttempt`** — 单次压缩尝试记录
+
+```python
+@dataclass
+class CompressionAttempt:
+    attempt: int                        # 尝试编号（1-based）
+    summary: str                        # LLM 生成的摘要
+    verification: CompressionConsistency  # 验证结果
+    tokens_consumed: int = 0            # 本次消耗的总 token 数
+    input_tokens_consumed: int = 0      # 输入 token 数
+    output_tokens_consumed: int = 0     # 输出 token 数
+    error: str | None = None            # 异常信息
+```
+
+**`CompressionError`** — 压缩异常
+
+```python
+class CompressionError(Exception):
+    """压缩不可恢复失败（所有重试耗尽）时抛出。"""
+```
+
+---
+
+#### 5.5.5 一致性验证 (`compression/consistency.py`)
+
+```python
+@dataclass
+class CompressionConsistency:
+    valid: bool                          # 无致命错误时为 True
+    system_preserved: bool = True        # system prompt 不变（设计保证）
+    tool_uses_traceable: bool = True     # 旧轮次 tool_use 在摘要中可追溯
+    compressed_rounds: int = 0           # 压缩的轮次数
+    preserved_rounds: int = 0            # 保留的轮次数
+    warnings: list[str] = []             # 非致命警告
+    errors: list[str] = []               # 致命错误
+    input_tokens_consumed: int = 0       # 本次 LLM 调用输入 token
+    output_tokens_consumed: int = 0      # 本次 LLM 调用输出 token
+
+
+def verify_compression(
+    original_messages: list[dict],
+    compressed_messages: list[dict],
+    old_rounds: list[list[dict]],
+    recent_rounds: list[list[dict]],
+    summary: str,
+) -> CompressionConsistency:
+```
+
+**4 项检查**：
+
+| # | 检查项 | 失败级别 | 说明 |
+|---|--------|---------|------|
+| 1 | recent_rounds 完整性 | **致命** | 压缩后 recent_rounds 中每条消息必须与原始完全一致，不允许任何修改 |
+| 2 | 摘要非空且有意义 | **致命** | 摘要为空字符串或少于 20 字符视为致命错误 |
+| 3 | 消息数量减少 | 警告 | old_rounds 仅 1 条消息时发出警告（压缩收益微乎其微） |
+| 4 | tool_use 覆盖率 | 警告 | 旧轮次中 tool_use 的工具名在摘要中提及不足 50% 时警告 |
+
+验证结果由 `compress()` 的重试循环消费：
+- `errors` 非空 → `valid=False` → 错误信息注入下一次重试的提示词
+- 仅 `warnings` 非空 → `valid=True` → 继续使用压缩结果，仅记录日志
+
+---
+
+#### 5.5.6 Prompt 模板 (`compression/prompts.py`)
+
+所有 prompt 模板定义为模块级字符串常量，可被导入和自定义。
+
+| 常量 | 说明 | 占位符 |
+|------|------|--------|
+| `COMPRESSION_REQUEST` | 主压缩请求提示词 | `{preview_chars}`, `{conversation_text}` |
+| `RETRY_FEEDBACK` | 验证失败时的重试反馈 | `{previous_errors}` |
+| `CONVERSATION_SUMMARY` | 压缩后注入的摘要包装 | `{summary}` |
+| `TOOL_RESULT_TRUNCATED` | tool_result 截断标记 | `{preview}`, `{original_len}` |
+| `ROUND_HEADER` | 每轮的分隔标题 | `{round_num}` |
+
+**自定义方式**：
+
+```python
+# 方式 1: 代码中覆盖（只需 {preview_chars} 和 {conversation_text} 占位符）
+config = AgentConfig(
+    compression=CompressionConfig(
+        prompt_template="请总结以下对话: {conversation_text}"
+    )
+)
+
+# 方式 2: 直接编辑 compression/prompts.py 中的模板常量
+```
+
+**tool_result 短缩策略**：压缩提示渲染时，每个 `tool_result` block 的 `content` 截断到 `tool_result_preview_chars` 字符，超出部分标记为 `[... truncated, original ~N chars]`。非字符串 content 用 `repr()` 后再截断。
+
+---
+
+#### 5.5.7 调用方集成
+
+`CompactMessage` 是流中的非破坏性事件——调用方可选监听，不匹配时自动忽略。
+
+```python
+async for msg in agent.stream(prompt):
+    match msg:
+        case CompactMessage(status="started", tokens_before=n):
+            print(f"[压缩开始] 当前上下文 ~{n} tokens，正在生成摘要...")
+        case CompactMessage(status="completed", summary=s, retries_used=r):
+            print(f"[压缩完成] 重试 {r} 次，摘要: {s[:100]}...")
+        case CompactMessage(status="skipped", error_detail=e):
+            print(f"[压缩跳过] {e}，使用硬截断")
+        case AssistantText(content=text):
+            # 正常响应处理
+            ...
+```
+
+**关闭压缩**（仅用硬截断）：
+
+```python
+config = AgentConfig(
+    compression=CompressionConfig(enabled=False),
+)
+```
+
+**压缩 token 统计**：压缩调用的 token 消耗不计入 `max_turns` 预算，但累加到 `total_input_tokens` 和 `total_output_tokens`，最终反映在 `DoneMessage.total_tokens` 中。
 
 ---
 
@@ -1556,7 +1905,8 @@ max_concurrency: int = Field(
 | Phase 1: 基础设施 | #1 脚手架 (2) + #2 Tool 框架 (2) + #3 多Provider集成 (3) | 7 | ✅ 已完成 |
 | Phase 2: Agent 核心循环 | #4 主循环 (4) + CLI测试入口 (1) | 5 | ✅ 已完成 |
 | Phase 2: 工具管线 & 权限 | #5 管线+权限系统 (4) | 4 | ✅ 已完成 |
-| Phase 2: 剩余 | #5.5 压缩 (2) + #6 MCP (2) | 4 | ⬜ 待实现 |
+| Phase 2: 剩余 | #5.5 压缩 (2) | 2 | ✅ 已完成 |
+| Phase 2: 剩余 | #6 MCP (2) | 2 | ⬜ 待实现 |
 | Phase 3: 子Agent & 扩展 | #7 Agent 定义 (2) + #8 执行引擎 (5) + #9 Hooks/Plugin/Skills (2) | 9 | ⬜ 待实现 |
 | Phase 4: 持久化 & 收尾 | #10 持久化 (2) + #11 测试/文档/发布 (2) | 4 | ⬜ 待实现 |
 | **总计** | **13 条目** | **33 天 (~7 周)** | 已实现 ~55% |
@@ -1711,24 +2061,49 @@ agent-core/
 │
 ├── tests/
 │   ├── __init__.py
-│   ├── conftest.py                 # pytest fixtures (MockModel, tmp_workspace)
-│   ├── unit/                       # 单元测试
-│   │   ├── test_tools_read.py
-│   │   ├── test_tools_edit.py
-│   │   ├── test_tools_bash.py
-│   │   ├── test_permissions.py
-│   │   ├── test_hooks.py
-│   │   └── test_normalize.py
+│   ├── conftest.py                 # pytest fixtures (default_config, custom_config)
+│   ├── unit/                       # 单元测试 (498 tests)
+│   │   ├── conftest.py
+│   │   ├── test_models.py          # AgentConfig / ModelId / CompressionConfig 模型校验
+│   │   ├── test_messages.py        # AgentResult / AgentMessage  discriminated union
+│   │   ├── test_agent.py           # Agent 类 (init/run/stream/permission callback)
+│   │   ├── test_tools_registry.py  # @register_tool / get_tool() / 重注册
+│   │   ├── test_tools_context.py   # ToolUseContext / ToolCallResult 数据模型
+│   │   ├── test_tools_read.py      # FileReadTool (读取/缓存/编码/binary/字节截断)
+│   │   ├── test_tools_edit.py      # FileEditTool (替换/删除/stale检测/权限)
+│   │   ├── test_tools_write.py     # FileWriteTool (写入/覆盖/目录创建/权限保留)
+│   │   ├── test_tools_glob.py      # GlobTool (匹配/排序/截断/隐藏文件)
+│   │   ├── test_tools_grep.py      # GrepTool (rg --json 输出模式/分页/过滤)
+│   │   ├── test_tools_bash.py      # BashTool (echo/失败/超时/abort/退出码)
+│   │   ├── test_tools_workspace.py # 工作区边界检查 (Read/Write/Edit/Glob/Bash)
+│   │   ├── test_tools_attributes.py # Tool 类属性 (is_concurrency_safe 等)
+│   │   ├── test_tools_edge_cases.py # 混合并发/大结果持久化/设备文件/写入错误清理
+│   │   ├── test_anthropic_provider.py # AnthropicClient (classify/normalize/convert)
+│   │   ├── test_openai_provider.py  # OpenAIClient (classify/normalize/convert)
+│   │   ├── test_deepseek_provider.py # DeepSeekClient (classify/normalize/convert)
+│   │   ├── test_provider_registry.py # register_client / get_client / retry_config
+│   │   ├── test_permissions.py      # PermissionEngine + 继承 + Bash AST 安全
+│   │   ├── test_loop_helpers.py     # 消息构建器 + run_tool_use / run_tools
+│   │   ├── test_budget.py           # TokenBudget / token 估算 / context window
+│   │   ├── test_truncate.py         # hard_truncate 轮次分区截断
+│   │   ├── test_context.py          # enrich_context / git status 采集
+│   │   ├── test_compression.py      # 压缩触发器/提示词/一致性验证 (unit)
+│   │   ├── test_logging.py          # TurnTracer 结构化日志
+│   │   ├── test_hooks.py            # (桩 — not yet implemented)
+│   │   └── test_normalize.py        # (桩 — not yet implemented)
 │   ├── integration/                # mock model 集成测试 (无真实 API)
-│   │   ├── mock_model.py           # MockModel 实现
+│   │   ├── conftest.py
+│   │   ├── mock_model.py           # MockClient / make_text_turn / make_tool_use_turn
+│   │   ├── test_query_loop.py      # query() 单轮/多轮/max_turns/error
 │   │   ├── test_tool_pipeline.py   # 并发/串行工具管线
-│   │   ├── test_subagent.py        # 子Agent 隔离 + sidechain
-│   │   ├── test_fork.py            # Fork Agent 消息预处理
-│   │   └── test_permission_inheritance.py  # 权限继承链
+│   │   ├── test_compression.py     # compress() + query() loop 压缩路径
+│   │   ├── test_subagent.py        # (桩 — not yet implemented)
+│   │   ├── test_fork.py            # (桩 — not yet implemented)
+│   │   └── test_permission_inheritance.py  # (桩 — not yet implemented)
 │   └── e2e/                        # vcrpy 录制回放 (需 API key 录制一次)
-│       ├── cassettes/              # vcrpy 录制文件
-│       ├── test_turn_flow.py       # 端到端 turn flow
-│       └── test_compression.py     # 自动压缩触发
+│       ├── conftest.py
+│       ├── test_turn_flow.py       # (桩 — not yet implemented)
+│       └── test_compression.py     # (桩 — not yet implemented)
 │
 ├── docs/                           # MkDocs Material
 │   ├── mkdocs.yml
