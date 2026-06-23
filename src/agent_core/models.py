@@ -251,13 +251,25 @@ class AgentConfig(BaseModel):
         default_factory=dict,
         description="MCP server configurations keyed by server name",
     )
+    workspace_root: str | None = Field(
+        default=None,
+        description=(
+            "Workspace root directory used as the security boundary for "
+            "file/path tools (Read/Edit/Write/Glob and Bash working_dir). "
+            "When None, the workspace boundary check is disabled and tools "
+            "may operate anywhere the process can reach."
+        ),
+    )
     skills_dir: str | None = Field(
         default=None,
-        description="Directory path for skill definitions",
+        description="Directory path for skill definitions (not yet wired — Item 9)",
     )
     hooks: list[Any] = Field(
         default_factory=list,
-        description="Hook instances registered at agent bootstrap",
+        description=(
+            "Hook instances registered at agent bootstrap "
+            "(not yet wired — Item 9; values are currently ignored)"
+        ),
     )
     allow_unknown_model: bool = Field(
         default=False,

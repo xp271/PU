@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -72,7 +72,14 @@ async def test_run_git_status_non_git_directory(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_run_git_status_timeout_handled_gracefully() -> None:
     """When git hangs, timeout should be caught and return None."""
-    with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError("timeout")):
+    # Mock the subprocess so no real ``git`` process is spawned — otherwise the
+    # real ``proc.communicate()`` coroutine is created but never awaited (since
+    # wait_for is patched to raise), emitting a RuntimeWarning. ``communicate``
+    # on a MagicMock returns a MagicMock, not a coroutine.
+    fake_proc = MagicMock()
+    with patch(
+        "asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)
+    ), patch("asyncio.wait_for", side_effect=asyncio.TimeoutError("timeout")):
         result = await _run_git_status(".")
         assert result is None
 

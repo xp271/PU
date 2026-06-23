@@ -64,6 +64,7 @@ class Agent:
                 config=self._config,
                 trace_id=self._trace_id,
                 permission_callback=self._permission_callback,
+                workspace_root=self._config.workspace_root,
             )
         ) as stream:
             async for message in stream:

@@ -25,6 +25,14 @@ src/agent_core/
 ├── llm/                 # LLM 多 Provider 集成（详见第 3 节）
 ├── query/               # Agent 主循环（详见第 4 节）
 ├── logging/             # 结构化日志
+├── mcp/                 # MCP 协议集成（详见第 6 节）
+│   ├── __init__.py      # 公开导出: McpSessionManager, register_mcp_tools
+│   ├── _transport.py    # stdio/SSE/WebSocket transport 适配器
+│   ├── auth.py          # OAuth 2.0/2.1 token 管理
+│   ├── client.py        # McpSessionManager + McpConnectionState
+│   ├── config.py        # 配置加载链: .mcp.json → env 展开 → McpServerConfig
+│   ├── registry.py      # MCP 工具 → Tool 子类动态桥接
+│   └── resources.py     # MCP Resource/Prompt 获取（预留 Phase 3）
 └── tools/               # 工具系统（详见第 2 节）
 ```
 
@@ -94,8 +102,8 @@ Agent(config: AgentConfig) -> None
 
 | 方法 | 签名 | 说明 |
 |------|------|------|
-| `run` | `async run(prompt: str) -> AgentResult` | 消费 `stream()` 的异步生成器，聚合所有 `AgentMessage` 为最终的 `AgentResult`。当前 `stream()` 尚未实现，会抛出 `NotImplementedError`。 |
-| `stream` | `async stream(prompt: str) -> AsyncGenerator[AgentMessage, None]` | **尚未实现**。调用 LLM API、执行工具、逐轮产出 `AgentMessage`。 |
+| `run` | `async run(prompt: str) -> AgentResult` | 消费 `stream()` 的异步生成器，聚合所有 `AgentMessage` 为最终的 `AgentResult`。 |
+| `stream` | `async stream(prompt: str) -> AsyncGenerator[AgentMessage, None]` | 委托 `query()` 异步生成器产出 `AgentMessage`。内部用 `aclosing` 保活 MCP 会话清理。 |
 | `on_permission_check` | `on_permission_check(callback: PermissionCallback) -> None` | 注册异步权限回调。回调签名为 `async (tool_name: str, tool_input: dict) -> bool`，返回 `True` 表示允许，`False` 表示拒绝。 |
 
 **`PermissionCallback` 类型**
@@ -1731,32 +1739,313 @@ config = AgentConfig(
 
 ---
 
-### 6. MCP 协议集成 (2 天)
+### 6. MCP 协议集成 — 已实现
 
-**功能**: MCP 客户端，动态获取服务端工具并注册，配置来源管理，工具冲突去重，OAuth 认证。
+**功能**: MCP 客户端，动态获取服务端工具并注册为 `Tool` 子类，配置来源管理，工具冲突去重，OAuth 认证，启动预检。
 
-**原因**: MCP 是 Agent 扩展能力的标准协议。一个协议接入所有兼容服务，避免为每个外部工具写胶水代码。
+**原因**: MCP 是 Agent 扩展能力的标准协议 — 一个协议接入所有兼容服务，避免为每个外部工具写胶水代码。
 
-- [ ] MCP transport 抽象：stdio / SSE / WebSocket（使用 `mcp` Python SDK 的 transport 层）
-- [ ] `connect_to_server(name, McpServerConfig)` → 建立连接 → 返回 client handle
-- [ ] `fetch_tools_for_client(client)` → 获取服务端工具列表 → 为每个工具动态创建 Tool 子类 → 注册到全局 Tool 注册表
-- [ ] 工具名格式：`mcp__{server_name}__{tool_name}`，避免与内置工具冲突
-- [ ] 服务端工具与内置工具冲突检测：同名时内置优先，打印 warning
-- [ ] MCP 配置加载链：项目 `.mcp.json` → 全局 `~/.agent/mcp.json` → `AgentConfig.mcp_servers` 代码注入
-- [ ] MCP 资源 / Prompt 获取（映射到 Skill 系统，在 Phase 3 接入）
-- [ ] OAuth 认证流程：token 刷新 / step-up 认证 / 过期处理
+#### 6.1 配置模型 (`models.py`)
+
+##### `McpServerTransport` (Enum)
+
+```
+STDIO = "stdio"         # 子进程 stdin/stdout JSON-RPC
+SSE   = "sse"           # HTTP Server-Sent Events
+WEBSOCKET = "websocket" # WebSocket（未实现，connect 会抛 NotImplementedError）
+```
+
+##### `McpOAuthConfig` (Pydantic BaseModel)
+
+OAuth 2.0/2.1 认证配置，与 transport 层解耦 — Manager 解析 token → transport 注入 `Authorization: Bearer` header。
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `client_id` | `str` | 是 | OAuth client ID |
+| `client_secret` | `str \| None` | 否 | client secret（client_credentials flow 需要） |
+| `authorization_url` | `str \| None` | 否 | authorization code flow 入口 |
+| `token_url` | `str` | 是 | token endpoint |
+| `scopes` | `list[str]` | 否 | 权限范围，默认 `[]` |
+| `redirect_uri` | `str \| None` | 否 | 回调地址 |
+| `device_code_url` | `str \| None` | 否 | 设备码入口 |
+| `token` | `str \| None` | 否 | **运行时存储**: 当前 access token |
+| `refresh_token` | `str \| None` | 否 | **运行时存储**: refresh token |
+| `expires_at` | `float \| None` | 否 | **运行时存储**: token 过期 Unix 时间戳 |
+| `audience` | `str \| None` | 否 | JWT aud 校验（未使用） |
+| `issuer` | `str \| None` | 否 | JWT iss 校验（未使用） |
+
+##### `McpServerConfig` (Pydantic BaseModel)
+
+单个 MCP 服务器的连接配置。`@model_validator` 校验 transport 与必填字段的对应关系（stdio 需要 `command`，sse/websocket 需要 `url`）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `transport` | `McpServerTransport` | `"stdio"` | 传输方式 |
+| `command` | `str \| None` | `None` | stdio 模式：可执行文件路径 |
+| `args` | `list[str]` | `[]` | stdio 模式：启动参数 |
+| `env` | `dict[str, str]` | `{}` | stdio 模式：子进程环境变量 |
+| `url` | `str \| None` | `None` | sse/websocket 模式：服务端点 URL |
+| `headers` | `dict[str, str]` | `{}` | 附加 HTTP headers |
+| `cwd` | `str \| None` | `None` | stdio 子进程工作目录 |
+| `auth` | `McpOAuthConfig \| None` | `None` | OAuth 认证 |
+| `include_tools` | `list[str] \| None` | `None` | 正则白名单，匹配的工具才注册 |
+| `exclude_tools` | `list[str] \| None` | `None` | 正则黑名单，匹配的工具不注册 |
+| `connect_timeout` | `float` | `30.0` | 连接超时（秒） |
+| `request_timeout` | `float` | `60.0` | 单次请求超时（秒，当前未绑定到 call_tool） |
+| `max_reconnect_attempts` | `int` | `3` | 失败重试次数 |
+| `reconnect_delay` | `float` | `2.0` | 重试退避基数（秒），实际延迟 = delay × 2^attempt |
+
+##### `AgentConfig` 中
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `mcp_servers` | `dict[str, McpServerConfig]` | `{}` | MCP 服务端配置，键为服务名 |
+
+#### 6.2 配置加载链 (`mcp/config.py`)
+
+**`load_mcp_servers() → dict[str, McpServerConfig]`**
+
+加载优先级（高覆盖低）:
+1. `AgentConfig.mcp_servers`（代码注入）
+2. `.mcp.json`（项目根）
+3. `~/.agent/mcp.json`（用户家目录）
+
+同名 server key 时：项目级替换用户级（不是深合并字段）。先展开 `${ENV_VAR}` 占位符（递归），再校验为 `McpServerConfig`。缺失的环境变量直接抛 `KeyError`（fail fast，不静默跳过）。解析失败的单条 server 打 error 日志后跳过。
+
+`.mcp.json` 格式示例:
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "C:\\Program Files\\nodejs\\npx.cmd",
+      "args": ["-y", "@playwright/mcp"]
+    },
+    "duckduckgo-search": {
+      "command": "C:\\Program Files\\nodejs\\npx.cmd",
+      "args": ["-y", "duckduckgo-mcp-server"]
+    },
+    "excel": {
+      "command": "C:\\Program Files\\nodejs\\npx.cmd",
+      "args": ["--yes", "@negokaz/excel-mcp-server"]
+    }
+  }
+}
+```
+
+`${ENV_VAR}` 占位符示例:
+```json
+{ "env": { "BRAVE_API_KEY": "${BRAVE_API_KEY}" } }
+```
+
+`include_tools` / `exclude_tools` 示例（正则匹配原始工具名）:
+```json
+{ "include_tools": ["search", "browser_.*"], "exclude_tools": ["dangerous_.*"] }
+```
+
+#### 6.3 Transport 适配器 (`mcp/_transport.py`)
+
+**`async open_session(config: McpServerConfig, auth_headers: dict | None) → AsyncGenerator[ClientSession]`**
+
+async context manager，按 `config.transport` 分发:
+
+```
+"stdio" → stdio_client(StdioServerParameters(command, args, env, cwd)) → ClientSession
+"sse"   → sse_client(url, headers + auth_headers) → ClientSession
+"websocket" → raise NotImplementedError
+```
+
+Session yield 在 transport 的 async-with 内部 → transport/subprocess 在 session 存活期间保持运行。`initialize()` 在首次创建时调用一次。
+
+#### 6.4 连接管理与生命周期 (`mcp/client.py`)
+
+##### `McpConnectionState` (dataclass)
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `server_name` | `str` | 服务器名称 |
+| `config` | `McpServerConfig` | 配置引用 |
+| `session` | `Any` | 活跃的 `ClientSession`（duck-typed） |
+| `tools` | `list[dict]` | `list_tools()` 的缓存结果，每个元素 `{"name", "description", "inputSchema"}` |
+| `connected_at` | `float` | `time.monotonic()` 时间戳 |
+| `connection_error` | `str \| None` | 连接失败时的错误信息 |
+| `fatal` | `bool` | 是否为不可重试的错误（401/403/config 错误） |
+
+##### `McpSessionManager`
+
+query 作用域的单例管理器，用一个 `AsyncExitStack` 进入所有 transport/session 对。
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `connect` | `async connect(name: str, config: McpServerConfig) → McpConnectionState` | 连接一个 server。成功时 session+transport 进入 `AsyncExitStack`。内部循环 `max_reconnect_attempts+1` 次，每次受 `asyncio.timeout(connect_timeout)` 保护。不可重试错误（401/403/config 错误）直接标记 `fatal=True` 停止重试。**约束**: 必须与 `aclose()` 在同一个 asyncio task 调用 |
+| `refresh_tools` | `async refresh_tools(name: str) → list[dict]` | 重新 `list_tools()` 并更新缓存（用于 `notifications/list_changed`） |
+| `aclose` | `async aclose() → None` | **必须在 connect 的同一个 task 里调用**。逆序退出 AsyncExitStack 中的所有 async context manager → 关闭所有 session → 关闭所有 transport 子进程/连接。清理 `connections` dict。 |
+
+##### 错误分类（`_is_fatal_error`）
+
+| 错误条件 | 结果 | 原因 |
+|----------|------|------|
+| HTTP 401 / 403 | fatal（不重试） | 认证失败，重试无意义 |
+| HTTP 5xx | 重试 | 服务端临时故障 |
+| `NotImplementedError` | fatal | 配置错误（如用了 websocket transport） |
+| `FileNotFoundError` | fatal | command 路径错误 |
+| `ValueError` | fatal | transport 字段校验失败 |
+| 错误消息含 `unauthorized`/`forbidden`/`invalid_grant`/`invalid_client` | fatal | 关键字兜底 |
+
+#### 6.5 MCP 工具 → Tool 子类桥接 (`mcp/registry.py`)
+
+##### 命名规则
+
+| 函数 | 输入 | 输出 | 说明 |
+|------|------|------|------|
+| `_mcp_tool_name(server, tool)` | `("excel", "read_data_from_excel")` | `"mcp__excel__read_data_from_excel"` | 构建名字空间化名称 |
+| `_mcp_tool_name(server, tool)` | `("@playwright/mcp", "browser_navigate")` | `"mcp___playwright_mcp__browser_navigate"` | 非法字符 `@`/`/` 被替换为 `_` |
+| `_parse_mcp_tool_name(name)` | `"mcp__github__list_issues"` | `("github", "list_issues")` | 反解析（目前未被外部调用） |
+
+**Sanitization 规则**: `_INVALID_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]")` — 将不符合 provider 函数名 pattern（`^[a-zA-Z0-9_-]+$`）的字符逐字替换为 `_`。逐字替换保证 `_unregister_server_tools` 用的前缀 `mcp__{server}__` 仍是 sanitized 后名称的有效前缀。
+
+##### `register_mcp_tools(registry, server_name, state) → dict[str, type[Tool]]`
+
+为 `state.tools` 中每个工具动态创建 `Tool` 子类并注入 `registry`。
+
+1. **移除旧条目**: 以 `mcp__{server_name}__` 为前缀 delete registry 中的旧工具。
+2. **冲突检测**: 若原始工具名与内置工具同名 → 内置优先，MCP 工具仅以 namespaced 名注册（打印 warning）。
+3. **动态类构建**: `_build_mcp_tool_class(namespaced, server_name, tool_def, state)` → 注册 → 返回 dict。
+
+##### 动态 `Tool` 子类结构
+
+`_build_mcp_tool_class` 动态创建一个 `type("MCPTool_{namespaced}", (Tool,), class_dict)`:
+
+| 属性/方法 | 说明 |
+|-----------|------|
+| `name: ClassVar[str]` | `"mcp__excel__read_data_from_excel"`（sanitized，用于 LLM 侧） |
+| `is_concurrency_safe` | `False`（MCP session 非线程安全） |
+| `is_read_only` | `False` |
+| `is_destructive` | `False` |
+| `_server_name: str` | 原始 server name（`"excel"`） |
+| `_mcp_tool_name: str` | **原始**工具名（`"read_data_from_excel"`），供 `call_tool` 使用 |
+| `_session_getter: staticmethod` | 懒引用 `state.session`（重连后自动指向新 session） |
+| `_input_model: type[BaseModel]` | Pydantic 输入模型，由 `inputSchema` 转换 |
+| `input_schema() → dict` | **classmethod**。返回 server 提供的 `inputSchema`（非 object 时兜底为 `{"type":"object","additionalProperties":true}`）。**关键**: 无此方法则继承基类 `raise NotImplementedError` → convert_tools 崩溃 |
+| `validate_input(dict) → BaseModel` | **classmethod**。通过 `_input_model` 校验输入 |
+| `call(input, ctx) → ToolCallResult` | **async**。取 session → `session.call_tool(_mcp_tool_name, args)` → 提取 `list[ContentBlock]` 文本 → 返回 `ToolCallResult`。session 为 None 时返回错误结果 |
+
+##### `_build_input_model(namespaced, tool_def) → type[BaseModel]`
+
+将 MCP `inputSchema`（JSON Schema）转换为 Pydantic model:
+
+| inputSchema 情况 | 结果 |
+|-------------------|------|
+| `{"type":"object","properties":{...}}` | 逐字段映射：`string→str, integer→int, number→float, boolean→bool, array→list, object→dict`，required 字段用 `...` 标记 |
+| 类型为 list（如 `["string","null"]`） | 该字段 fallback 为 `Any` |
+| 无 schema / 非 object / 空 properties | 创建 `raw: dict[str,Any]` 单字段 fallback 模型 |
+
+##### 工具名 Sanitization vs 实际调用
+
+```
+LLM sees:      mcp___playwright_mcp__browser_navigate   (sanitized)
+Registry key:  mcp___playwright_mcp__browser_navigate   (same)
+call_tool:     "browser_navigate"                        (original, from _mcp_tool_name)
+```
+
+#### 6.6 MCP 在 query() 中的生命周期 (`query/loop.py`)
+
+**核心契约**: `McpSessionManager.connect()` 和 `aclose()` 必须在同一个 asyncio task 中调用（anyio cancel-scope 要求）。`query()` 通过 `try/finally` 保证这点,且消费者层（`Agent.stream` / CLI REPL）都用 `aclose()` 显式关闭流:
+
+```
+query():
+    mcp = McpSessionManager()
+    try:
+        await _bootstrap_mcp(mcp, config, registry)  # 连接 + 注册
+        async for msg in _run_turns(...):             # 回合循环
+            yield msg
+    finally:
+        await mcp.aclose()  # 必定在当前 task 执行，无论哪个 return 路径
+```
+
+`_bootstrap_mcp` 遍历所有 server,连接失败的打 warning 跳过,不阻塞整个 query。
+
+`_run_turns` 是纯回合循环,不持有 mcp 引用 → 它的多个提前 `return` 路径不受影响。
+
+#### 6.7 CLI 启动预检 (`cli.py`)
+
+**`async _preflight_mcp(config: AgentConfig) → None`**
+
+在 REPL 接受输入前,遍历所有配置的 server 做一次连接 + `list_tools` + 立即 `aclose()`:
+
+1. **预热**: 触发 `npx -y` 包下载进 npm 缓存 → 第一个真实 query 不被冷下载阻塞。
+2. **健康检查**: 坏掉的 server 立即打印 `[mcp] x <name>: <reason>` 到 stderr,不等到调用时才发现。
+
+在 `_main()` 中 `await _preflight_mcp(config)` → `await _repl(config)`。预检使用独立的 `McpSessionManager`,连接不跨查询复用。
+
+#### 6.8 OAuth 认证 (`mcp/auth.py`)
+
+**`OAuthTokenManager`** — 与 transport 解耦,Manager 解析 bearer token → transport 注入 HTTP header。
+
+| 方法 | 说明 |
+|------|------|
+| `get_valid_token() → str \| None` | 获取有效 token,必要时自动刷新。按序尝试: ① 已有 token 未过期 → 返回; ② 快过期 → refresh; ③ 无 token 但有 client_secret → client_credentials flow; ④ 都不满足 → 返回 None |
+| `start_authorization_code_flow(code, verifier?) → str` | 用 authorization code 换 token（支持 PKCE） |
+| `start_device_code_flow() → dict` | 发起设备码流程,返回 `{device_code, user_code, verification_uri}` |
+
+**刷新策略**: token 进入最后 20% 生命周期时刷新（至少 60s 安全余量）。刷新失败 → token 置 None,不清除 refresh_token（下次可重试）。
+
+#### 6.9 MCP 资源 & Prompt 获取 (`mcp/resources.py`)
+
+当前为预留模块,Phase 3 会映射到 Skill 系统。
+
+| 函数 | 说明 |
+|------|------|
+| `async fetch_resources(session) → list[dict]` | `list_resources()` → 返回 `[{uri, name, description}]` |
+| `async read_resource(session, uri: str) → list[Any]` | `read_resource(uri)` → 返回 `contents` |
+
+#### 6.10 公开导出 (`mcp/__init__.py`)
+
+```python
+from agent_core.mcp import (
+    McpSessionManager,     # 连接生命周期管理
+    register_mcp_tools,    # 动态工具注册
+)
+```
+
+其余模块（config/transport/auth/resources）为内部实现,不直接对调用方暴露。
+
+#### 6.11 MCP 故障排查
+
+| 症状 | 可能原因 | 排查 |
+|------|----------|------|
+| `NotImplementedError` on every query | 动态 Tool 子类未定义 `input_schema()` → convert_tools 崩溃 | 检查 `registry.py` 中 `_build_mcp_tool_class` 是否挂了 `input_schema` classmethod |
+| HTTP 400: `Invalid tools[N].function.name` | server name 含 `@` `/` 等非法字符 | 检查 `_mcp_tool_name` 是否做了 per-character sanitization |
+| `RuntimeError: exit cancel scope in a different task` at shutdown | `mcp.aclose()` 在错误的 task 调用或在 shutdown 时才调用 | 检查 `query()` 是否有 `try/finally` 包裹,消费者是否显式 `aclose()` |
+| `npx -y` download timeout | 首次下载大包超过 `connect_timeout` (30s) | 调大 `.mcp.json` 中该 server 的 `connect_timeout` |
+| `KeyError: Environment variable 'X' referenced...` at startup | `.mcp.json` 用了 `${X}` 占位符但 X 未设 | 设置环境变量或改为硬编码值 |
+
+#### 6.12 当前 `.mcp.json` 配置
+
+项目根已配置 3 个 server,全免 API key,stdio transport:
+
+| Server | 包 | 工具示例 | 说明 |
+|--------|-----|----------|------|
+| `playwright` | `@playwright/mcp` | `browser_navigate`, `browser_click`, `browser_snapshot` | 浏览器自动化 |
+| `duckduckgo-search` | `duckduckgo-mcp-server` | `search` | 免费联网搜索 |
+| `excel` | `@negokaz/excel-mcp-server` | `read_data_from_excel`, `write_data_to_excel` | Excel 读写 |
+
+注册后的名字空间化工具名示例: `mcp__playwright__browser_navigate`, `mcp__duckduckgo-search__search`, `mcp__excel__read_data_from_excel`。
+
+
 
 ---
 
 ## Phase 3: 子Agent & 多Agent (Week 5-6)
 
-### 7. Agent 定义系统 (2 天)
+### 7. Agent 定义系统 (2 天) — 已实现（执行引擎见 Item 8）
 
 **功能**: `AgentDefinition` 数据结构、加载器、优先级链、内置 Agent 注册。
 
 **原因**: 不同场景需要不同配置的 Agent——探索代码用只读工具，执行任务用读写工具。AgentDefinition 是子 Agent 的"配置模板"，一次定义反复使用。
 
-- [ ] `AgentDefinition` pydantic 模型：
+> **状态 (2026-06-23)**：本条目代码已落地于 `src/agent_core/agents/`（definition / registry / loader + 3 个内置 Agent），单测见 `tests/unit/test_agent_*.py`。`AgentDefinition` 是**纯能力模板数据**，目前尚无运行时消费者——执行引擎（`run_agent` / `AgentTool`）在 Item 8 实现，届时才会读取这些定义。
+
+- [x] `AgentDefinition` pydantic 模型：
   ```python
   class AgentDefinition:
       agent_type: str
@@ -1772,16 +2061,16 @@ config = AgentConfig(
       memory: "user" | "project" | "local" | None
       background: bool  # 默认是否异步执行
   ```
-- [ ] Agent 定义加载器：
+- [x] Agent 定义加载器：
   - markdown frontmatter 解析（`python-frontmatter`）→ AgentDefinition
   - JSON 文件加载
   - Python 代码直接注册（`agent_registry.register(my_definition)`）
-- [ ] 优先级链实现：user_settings > project_settings > local_settings > plugin > built-in（后加载的覆盖前者的同名字段，disallowed_tools 取并集）
-- [ ] 内置 Agent 注册：
+- [x] 优先级链实现：user_settings > project_settings > local_settings > plugin > built-in（后加载的覆盖前者的同名字段，disallowed_tools 取并集）
+- [x] 内置 Agent 注册：
   - **GeneralPurpose**：tools=["*"]，permission_mode=ask，默认 agent
   - **Explore**：tools=["Read", "Glob", "Grep"]，只读，用于代码库探索
   - **Plan**：tools=["Read", "Glob", "Grep"]，只读 + 产出文本计划
-- [ ] Agent 定义发现机制：扫描 `~/.agent/agents/` 目录 → `.md` / `.json` 文件
+- [x] Agent 定义发现机制：扫描 `~/.agent/agents/` 目录 → `.md` / `.json` 文件
 
 ---
 
@@ -1906,10 +2195,11 @@ config = AgentConfig(
 | Phase 2: Agent 核心循环 | #4 主循环 (4) + CLI测试入口 (1) | 5 | ✅ 已完成 |
 | Phase 2: 工具管线 & 权限 | #5 管线+权限系统 (4) | 4 | ✅ 已完成 |
 | Phase 2: 剩余 | #5.5 压缩 (2) | 2 | ✅ 已完成 |
-| Phase 2: 剩余 | #6 MCP (2) | 2 | ⬜ 待实现 |
-| Phase 3: 子Agent & 扩展 | #7 Agent 定义 (2) + #8 执行引擎 (5) + #9 Hooks/Plugin/Skills (2) | 9 | ⬜ 待实现 |
+| Phase 2: 剩余 | #6 MCP (2) | 2 | ✅ 已完成 |
+| Phase 3: 子Agent 定义 | #7 Agent 定义 (2) | 2 | ✅ 已完成（执行引擎见 #8） |
+| Phase 3: 子Agent & 扩展 | #8 执行引擎 (5) + #9 Hooks/Plugin/Skills (2) | 7 | ⬜ 待实现 |
 | Phase 4: 持久化 & 收尾 | #10 持久化 (2) + #11 测试/文档/发布 (2) | 4 | ⬜ 待实现 |
-| **总计** | **13 条目** | **33 天 (~7 周)** | 已实现 ~55% |
+| **总计** | **13 条目** | **33 天 (~7 周)** | 已实现 ~60% |
 
 ---
 

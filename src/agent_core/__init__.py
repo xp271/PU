@@ -1,4 +1,11 @@
 from .agent import Agent
+from .agents import (
+    AgentDefinition,
+    AgentMemory,
+    get_agent,
+    list_agents,
+    register_agent,
+)
 from .mcp import McpSessionManager, register_mcp_tools
 from .models import (
     AgentConfig,
@@ -36,6 +43,8 @@ from .tools import (
 __all__ = [
     "Agent",
     "AgentConfig",
+    "AgentDefinition",
+    "AgentMemory",
     "AgentMessage",
     "AgentResult",
     "AssistantText",
@@ -47,14 +56,17 @@ __all__ = [
     "FileEditTool",
     "FileReadTool",
     "FileWriteTool",
+    "get_agent",
     "GlobTool",
     "GrepTool",
+    "list_agents",
     "McpOAuthConfig",
     "McpServerConfig",
     "McpServerTransport",
     "McpSessionManager",
     "ModelId",
     "ModelProvider",
+    "register_agent",
     "Tool",
     "ToolCallResult",
     "ToolRegistry",
