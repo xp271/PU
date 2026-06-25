@@ -15,6 +15,15 @@ class ToolUseContext:
     messages: list[dict[str, Any]] = field(default_factory=list)
     agent_id: str = ""
     workspace_root: str | None = None
+    # -- §1.5: parent-agent handles, populated by query() for AgentTool --
+    parent_config: Any = None               # AgentConfig | None
+    parent_trace_id: str = ""
+    parent_permission_callback: Any = None  # PermissionCallback | None
+    parent_system: str = ""
+    parent_allowed_tools: frozenset[str] = field(default_factory=frozenset)
+    parent_disallowed_tools: frozenset[str] = field(default_factory=frozenset)
+    agent_depth: int = 0                    # §2.6 recursion guard
+    notification_queue: list[str] | None = None  # §5.5 async notification delivery
 
 
 class ToolCallResult(BaseModel):

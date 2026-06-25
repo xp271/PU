@@ -7,6 +7,11 @@ from .glob_tool import GlobTool
 from .grep_tool import GrepTool
 from .registry import get_tool, register_tool, registered_tools, ToolRegistry
 
+# AgentTool is registered via @register_tool when agents/__init__.py imports it.
+# We do NOT import it here — that would create a circular chain:
+#   query → llm/anthropic → tools.registry (via tools.__init__) →
+#   agents.tool → agents.__init__ → fork → run → query.
+
 __all__ = [
     "BashTool",
     "FileEditTool",

@@ -39,6 +39,7 @@ from ..models import (
 )
 from ..permissions.bash_guard import analyze_bash_command
 from ..permissions.engine import PermissionEngine
+from ..permissions.store import SessionPermissionStore
 from ..tools.base import ToolCallResult, ToolUseContext
 from ..tools.registry import get_tool, ToolRegistry, _default_registry
 from ..mcp.client import McpSessionManager
@@ -65,6 +66,9 @@ async def query(
     permission_callback: PermissionCallback | None = None,
     workspace_root: str | None = None,
     registry: ToolRegistry | None = None,
+    system: str | None = None,
+    initial_messages: list[dict[str, Any]] | None = None,
+    session_store: SessionPermissionStore | None = None,
 ) -> AsyncGenerator[AgentMessage, None]:
     """Run the full agent turn loop for a single user prompt.
 
@@ -74,6 +78,14 @@ async def query(
 
     *registry* is an optional ``ToolRegistry`` instance.  When ``None``
     the module-level default is used (backward compat).
+
+    *system* (new, §1.5): External system prompt override.  When not
+    ``None`` this string is used as the system prompt instead of
+    (in addition to) ``enrich_context()`` output.
+
+    *initial_messages* (new, §1.5): Pre-populated message history for
+    fork / resume paths.  When not ``None``, the turn loop starts from
+    this message list instead of a fresh ``[_build_initial_user_message(prompt)]``.
     """
 
     # ---- 0. Tool registry (query-scoped) ------------------------------------
@@ -98,6 +110,9 @@ async def query(
             permission_callback=permission_callback,
             workspace_root=workspace_root,
             registry=registry,
+            system=system,
+            initial_messages=initial_messages,
+            session_store=session_store,
         ):
             yield message
     finally:
@@ -141,6 +156,9 @@ async def _run_turns(
     permission_callback: PermissionCallback | None,
     workspace_root: str | None,
     registry: ToolRegistry,
+    system: str | None = None,
+    initial_messages: list[dict[str, Any]] | None = None,
+    session_store: SessionPermissionStore | None = None,
 ) -> AsyncGenerator[AgentMessage, None]:
     """Run the agent turn loop.
 
@@ -148,11 +166,29 @@ async def _run_turns(
     session manager, so its many early-return paths are safe.
     """
     # ---- 1. Initialisation (runs once) -------------------------------------
-    system = await enrich_context(workspace_root)
+    # §1.5: external system param takes precedence; augment with env context
+    env_ctx = await enrich_context(workspace_root)
+    if system is not None:
+        system = (system + "\n\n" + env_ctx) if env_ctx else system
+    else:
+        system = env_ctx
 
-    messages: list[dict[str, Any]] = [
-        _build_initial_user_message(prompt)
-    ]
+    # §1.5: fork / resume paths supply message history
+    if initial_messages is not None:
+        messages: list[dict[str, Any]] = list(initial_messages)
+        # Append the current prompt as final user message
+        if prompt:
+            messages.append(_build_initial_user_message(prompt))
+    else:
+        messages = [_build_initial_user_message(prompt)]
+
+    # §1.5: compute parent-allowed tools for AgentTool inheritance
+    if config.tools == ["*"]:
+        parent_allowed = frozenset(registry.names())
+    else:
+        parent_allowed = frozenset(config.tools)
+
+    notification_queue: list[str] = []
 
     tool_context = ToolUseContext(
         abort_signal=asyncio.Event(),
@@ -160,6 +196,15 @@ async def _run_turns(
         messages=messages,
         agent_id=trace_id,
         workspace_root=workspace_root,
+        # -- §1.5: parent-agent handles for AgentTool --
+        parent_config=config,
+        parent_trace_id=trace_id,
+        parent_permission_callback=permission_callback,
+        parent_system=system,
+        parent_allowed_tools=parent_allowed,
+        parent_disallowed_tools=frozenset(),
+        agent_depth=0,
+        notification_queue=notification_queue,
     )
 
     model_id = config.model_id
@@ -170,6 +215,7 @@ async def _run_turns(
 
     permission_engine = PermissionEngine.from_config(
         permission_mode=config.permission_mode,
+        session_store=session_store,
     )
 
     budget = TokenBudget(
@@ -183,11 +229,22 @@ async def _run_turns(
     # ---- 2. Turn loop ------------------------------------------------------
     for turn_index in range(1, config.max_turns + 1):
 
+        # -- 2a0. Notification queue drain (§1.5 / §5.5) -------------------
+        if notification_queue:
+            pending = "\n".join(notification_queue)
+            notification_queue.clear()
+            messages.append({
+                "role": "user",
+                "content": [{"type": "text", "text": pending}],
+            })
+
         # -- 2a. Budget / truncation check before the LLM call --------------
         if budget.is_exhausted():
+            await _drain_background_agents(tool_context)
             yield DoneMessage(
                 stop_reason="max_turns",
                 total_tokens=total_tokens,
+                final_messages=messages,
             )
             return
 
@@ -324,19 +381,23 @@ async def _run_turns(
 
                     case "error":
                         yield event  # ErrorMessage — pass through
+                        await _drain_background_agents(tool_context)
                         yield DoneMessage(
                             stop_reason="error",
                             total_tokens=total_tokens,
                             error_detail=event.message,  # type: ignore[attr-defined]
+                            final_messages=messages,
                         )
                         return
 
         except Exception as exc:
             yield ErrorMessage(message=str(exc), error_type=type(exc).__name__)
+            await _drain_background_agents(tool_context)
             yield DoneMessage(
                 stop_reason="error",
                 total_tokens=total_tokens,
                 error_detail=str(exc),
+                final_messages=messages,
             )
             return
 
@@ -347,6 +408,15 @@ async def _run_turns(
 
         # -- 2d. No tool uses → terminal turn -------------------------------
         if not tool_uses_in_turn:
+            # Before ending, await any pending background sub-agents so their
+            # <task-notification> results can be delivered on a further turn
+            # (and so the tasks are never orphaned at event-loop shutdown).
+            reg = _bg_registry(tool_context)
+            if reg is not None and reg.active_count > 0:
+                await reg.drain()
+                if notification_queue:
+                    # The 2a0 checkpoint will inject the notifications next turn.
+                    continue
             stop_reason = turn_stop_reason
             if stop_reason == "permission_denied":
                 pass  # preserve
@@ -354,6 +424,7 @@ async def _run_turns(
                 stop_reason=stop_reason,  # type: ignore[arg-type]
                 total_tokens=total_tokens,
                 error_detail=error_detail,
+                final_messages=messages,
             )
             return
 
@@ -378,15 +449,34 @@ async def _run_turns(
         #  and we've already handled the no-tool-use case above.)
 
     # ---- 3. Loop exhausted (max_turns reached) -----------------------------
+    await _drain_background_agents(tool_context)
     yield DoneMessage(
         stop_reason="max_turns",
         total_tokens=total_tokens,
+        final_messages=messages,
     )
 
 
 # ---------------------------------------------------------------------------
 # Message builders (Anthropic content-block format)
 # ---------------------------------------------------------------------------
+
+
+def _bg_registry(context: ToolUseContext):
+    """Return the background sub-agent registry attached to *context* (or None).
+
+    Lazy import avoids any import cycle with the agents package.
+    """
+    from ..agents.tool import get_bg_registry
+
+    return get_bg_registry(context)
+
+
+async def _drain_background_agents(context: ToolUseContext) -> None:
+    """Await any in-flight background sub-agents so they are never orphaned."""
+    reg = _bg_registry(context)
+    if reg is not None:
+        await reg.drain()
 
 
 def _build_initial_user_message(prompt: str) -> dict[str, Any]:

@@ -22,8 +22,25 @@ src/agent_core/
 ├── agent.py             # Agent 主类
 ├── cli.py               # 交互式 REPL 测试入口
 ├── models.py            # 所有 Pydantic 数据模型
+├── agents/              # Agent 定义 + 执行引擎（详见第 7-8 节）
+│   ├── __init__.py      # 公开导出 + 触发内置 Agent 注册
+│   ├── definition.py    # AgentDefinition Pydantic 模型 + AgentMemory 枚举
+│   ├── registry.py      # AgentRegistry 四层优先级链注册表
+│   ├── loader.py        # markdown/JSON 加载器 + 目录发现
+│   ├── resolve.py       # §7.6 消费契约纯函数
+│   ├── run.py           # §8.1 run_agent() 执行引擎
+│   ├── tool.py          # §8.2 AgentTool — LLM 可调用的子 Agent 工具
+│   ├── lifecycle.py     # §8.3 异步生命周期管理 + 通知
+│   ├── fork.py          # §8.4 Fork/恢复
+│   └── builtin/         # 内置 Agent 定义
+│       ├── __init__.py  # import 触发注册
+│       ├── general.py   # GeneralPurpose
+│       ├── explore.py   # Explore
+│       └── plan.py      # Plan
 ├── llm/                 # LLM 多 Provider 集成（详见第 3 节）
 ├── query/               # Agent 主循环（详见第 4 节）
+├── session/             # 会话运行时层（Phase A 已完成）
+│   └── state.py          # SessionState（跨 prompt 历史 + 权限记忆延续）
 ├── logging/             # 结构化日志
 ├── mcp/                 # MCP 协议集成（详见第 6 节）
 │   ├── __init__.py      # 公开导出: McpSessionManager, register_mcp_tools
@@ -57,15 +74,32 @@ from agent_core import (
     ToolUse,
     ToolResult,
     ErrorMessage,
+    CompactMessage,
+    CompressionConfig,
 
     # 模型标识 (Provider-agnostic)
     ModelProvider,
     ModelId,
 
+    # Agent 定义系统
+    AgentDefinition,
+    AgentMemory,
+    get_agent,
+    list_agents,
+    register_agent,
+    # 子 Agent 执行引擎
+    run_agent,
+    AgentTool,
+    # 权限
+    PermissionEngine,
+    PermissionOutcome,
+    SessionPermissionStore,
+
     # 工具系统
     Tool,
     ToolCallResult,
     ToolUseContext,
+    ToolRegistry,
     BashTool,
     FileEditTool,
     FileReadTool,
@@ -75,6 +109,13 @@ from agent_core import (
     get_tool,
     register_tool,
     registered_tools,
+
+    # MCP 集成
+    McpSessionManager,
+    McpServerConfig,
+    McpServerTransport,
+    McpOAuthConfig,
+    register_mcp_tools,
 )
 ```
 
@@ -261,6 +302,15 @@ class ToolUseContext:
     messages: list[dict[str, Any]]        # 当前对话消息历史
     agent_id: str = ""                    # Agent 实例标识
     workspace_root: str | None = None     # 工作区根目录（安全边界）
+    # -- 父级句柄（供 AgentTool 派生子 Agent，普通工具忽略）--
+    parent_config: Any = None             # AgentConfig | None
+    parent_trace_id: str = ""
+    parent_permission_callback: Any = None  # PermissionCallback | None
+    parent_system: str = ""
+    parent_allowed_tools: frozenset[str] = field(default_factory=frozenset)
+    parent_disallowed_tools: frozenset[str] = field(default_factory=frozenset)
+    agent_depth: int = 0                  # 嵌套深度（防止无限递归）
+    notification_queue: list[str] | None = None  # 异步通知投递队列
 ```
 
 **安全边界**：所有文件/路径类工具在操作前必须通过 `check_workspace()` 校验目标路径位于 `workspace_root` 之内，否则返回 `PermissionError`。
@@ -2035,85 +2085,507 @@ from agent_core.mcp import (
 
 ---
 
-## Phase 3: 子Agent & 多Agent (Week 5-6)
+## Phase 3: 子Agent & 扩展 (Week 5-6) — #7 已实现, #8 已实现, #9 待实现
 
-### 7. Agent 定义系统 (2 天) — 已实现（执行引擎见 Item 8）
+---
+
+### 7. Agent 定义系统
 
 **功能**: `AgentDefinition` 数据结构、加载器、优先级链、内置 Agent 注册。
 
 **原因**: 不同场景需要不同配置的 Agent——探索代码用只读工具，执行任务用读写工具。AgentDefinition 是子 Agent 的"配置模板"，一次定义反复使用。
 
-> **状态 (2026-06-23)**：本条目代码已落地于 `src/agent_core/agents/`（definition / registry / loader + 3 个内置 Agent），单测见 `tests/unit/test_agent_*.py`。`AgentDefinition` 是**纯能力模板数据**，目前尚无运行时消费者——执行引擎（`run_agent` / `AgentTool`）在 Item 8 实现，届时才会读取这些定义。
+**实现文件**:
 
-- [x] `AgentDefinition` pydantic 模型：
-  ```python
-  class AgentDefinition:
-      agent_type: str
-      when_to_use: str  # LLM 看到的描述
-      tools: list[str]  # ["*"] 或 ["Read", "Glob", ...]
-      disallowed_tools: list[str]
-      system_prompt: str  # 或 callable
-      model: str | None  # None = 继承父级
-      permission_mode: "bypassPermissions" | "acceptEdits" | "ask" | None
-      mcp_servers: dict[str, McpServerConfig]
-      hooks: list[Hook]
-      skills: list[str]
-      memory: "user" | "project" | "local" | None
-      background: bool  # 默认是否异步执行
-  ```
-- [x] Agent 定义加载器：
-  - markdown frontmatter 解析（`python-frontmatter`）→ AgentDefinition
-  - JSON 文件加载
-  - Python 代码直接注册（`agent_registry.register(my_definition)`）
-- [x] 优先级链实现：user_settings > project_settings > local_settings > plugin > built-in（后加载的覆盖前者的同名字段，disallowed_tools 取并集）
-- [x] 内置 Agent 注册：
-  - **GeneralPurpose**：tools=["*"]，permission_mode=ask，默认 agent
-  - **Explore**：tools=["Read", "Glob", "Grep"]，只读，用于代码库探索
-  - **Plan**：tools=["Read", "Glob", "Grep"]，只读 + 产出文本计划
-- [x] Agent 定义发现机制：扫描 `~/.agent/agents/` 目录 → `.md` / `.json` 文件
+| 文件 | 职责 |
+|------|------|
+| `src/agent_core/agents/__init__.py` | 公开 API 聚合 + 触发内置 Agent 注册 |
+| `src/agent_core/agents/definition.py` | `AgentDefinition` Pydantic 模型 + `AgentMemory` 枚举 |
+| `src/agent_core/agents/registry.py` | `AgentRegistry` 四层优先级链注册表 + 合并算法 |
+| `src/agent_core/agents/loader.py` | markdown frontmatter / JSON 加载器 + 目录发现 |
+| `src/agent_core/agents/builtin/__init__.py` | 内置 Agent 注册触发点 |
+| `src/agent_core/agents/builtin/general.py` | GeneralPurpose |
+| `src/agent_core/agents/builtin/explore.py` | Explore |
+| `src/agent_core/agents/builtin/plan.py` | Plan |
+
+**测试文件**:
+
+| 文件 | 说明 |
+|------|------|
+| `tests/unit/test_agent_definition.py` | 16 个单元测试（默认值/校验/序列化/exclude_unset） |
+| `tests/unit/test_agent_registry.py` | 37 个单元测试（注册/合并/并集/覆盖/排除默认/unregister） |
+| `tests/unit/test_agent_loader.py` | 13 个单元测试（JSON/Markdown 解析/发现/冲突/错误） |
+| `tests/unit/test_builtin_agents.py` | 14 个单元测试（注册验证/属性校验/引擎免批准） |
 
 ---
 
-### 8. 子Agent 执行引擎 & AgentTool (5 天)
+#### 7.1 数据模型 (`agents/definition.py`)
+
+##### `AgentMemory` 枚举
+
+```python
+class AgentMemory(str, Enum):
+    USER = "user"          # 跨会话持久化到用户记忆
+    PROJECT = "project"    # 项目级记忆
+    LOCAL = "local"        # 仅当前会话有效
+    NONE = "none"          # 无记忆
+```
+
+##### `AgentDefinition` Pydantic 模型
+
+Agent 能力模板 —— 纯数据容器，不包含任何执行逻辑。执行引擎（Item 8）读取此定义构建运行时环境。
+
+```python
+class AgentDefinition(BaseModel):
+    agent_type: str                          # 唯一标识符
+    when_to_use: str | None = None           # LLM 路由决策描述
+    tools: list[str] = ["*"]                 # 工具白名单
+    disallowed_tools: list[str] = []          # 工具黑名单
+    auto_approve_tools: list[str] = []        # 预授权免问工具
+    system_prompt: str = ""                  # 注入子 Agent 的 system prompt
+    model: str | None = None                 # 模型标识（None = 继承父级）
+    permission_mode: PermissionMode | None = None  # 权限模式（None = 继承父级）
+    mcp_servers: dict[str, McpServerConfig] = {}   # 专属 MCP 服务器
+    hooks: list[Any] = []                    # 专属 Hook 实例（Item 9）
+    skills: list[str] = []                   # 预加载 Skill 名称（Item 9）
+    memory: AgentMemory = AgentMemory.NONE   # 记忆持久化模式（Item 10）
+    background: bool = False                 # 是否默认后台异步执行（Item 8）
+```
+
+**字段详解**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `agent_type` | `str` | **(必填)** | 唯一标识符，仅允许 `[a-zA-Z0-9_-]`。空字符串或含非法字符触发 `ValueError`。 |
+| `when_to_use` | `str \| None` | `None` | LLM 看到的使用场景描述。AgentTool（Item 8）路由时匹配此文本。 |
+| `tools` | `list[str]` | `["*"]` | 工具白名单。`["*"]` 展开为父 Agent 全部允许的工具。不能为空列表。 |
+| `disallowed_tools` | `list[str]` | `[]` | 工具黑名单。合并时各层取**并集**。 |
+| `auto_approve_tools` | `list[str]` | `[]` | **预授权免问工具清单**（第 3 层权限机制）。Item 8 构建子 Agent 的 `PermissionEngine` 时将每项编译为 `PermissionRule(action="allow")`，绕过 ask 弹窗。**安全约束**：工具仍须通过 `tools ∩ 父级允许集` 过滤；只放宽「弹不弹窗」，不放宽「能不能调」。合并时各层取**并集**。 |
+| `system_prompt` | `str` | `""` | 注入子 Agent 的 system prompt。Item 8 中与父 system prompt + tool 列表拼接。 |
+| `model` | `str \| None` | `None` | 模型标识符（如 `"anthropic/claude-haiku-4-5"`）。`None` 继承父 Agent 当前模型。 |
+| `permission_mode` | `PermissionMode \| None` | `None` | 声明的权限模式。`None` 继承父模式。运行时实际 = `min(父, 此声明)`——不可提权。 |
+| `mcp_servers` | `dict[str, McpServerConfig]` | `{}` | 专属 MCP 服务器。Item 8 中与父 Agent 合并（同名 server 子覆盖父）。 |
+| `hooks` | `list[Any]` | `[]` | 专属 Hook 实例。Item 9 接入后生效。 |
+| `skills` | `list[str]` | `[]` | 预加载的 skill 名称。Item 9 接入后生效。 |
+| `memory` | `AgentMemory` | `NONE` | 子 Agent 记忆持久化模式。Item 10 接入后生效。 |
+| `background` | `bool` | `False` | `True` 时默认以后台异步模式启动（Item 8）。 |
+
+**校验规则**
+
+| 字段 | 规则 | 违反时 |
+|------|------|--------|
+| `agent_type` | 非空 + `^[a-zA-Z0-9_-]+$` | `ValueError` |
+| `tools` | 非空列表 | `ValueError` |
+
+**`model_dump(exclude_unset=True)` 行为**
+
+仅返回**显式赋过值**的字段。这是合并算法正确性的前提——避免高优先级层的默认值覆盖低优先级层的显式设置。
+
+```python
+d = AgentDefinition(agent_type="Min")
+d.model_dump(exclude_unset=True)  # → {"agent_type": "Min"}
+
+d2 = AgentDefinition(agent_type="T", tools=["Read"])
+d2.model_dump(exclude_unset=True)  # → {"agent_type": "T", "tools": ["Read"]}
+```
+
+##### `AgentDefinition` vs `AgentConfig`
+
+| 维度 | AgentConfig | AgentDefinition |
+|------|-------------|-----------------|
+| 用途 | 运行时配置 | 能力模板 |
+| API key | ✅ 包含 | ❌ 不包含（继承父级） |
+| max_turns | ✅ 包含 | ❌ 不包含（继承父级） |
+| tools | ✅ 运行时过滤 | ✅ 能力声明 |
+| system_prompt | ❌ 不包含 | ✅ 核心字段 |
+| permission_mode | ✅ 运行时模式 | ✅ 声明模式（可被继承降级） |
+| mcp_servers | ✅ 全局配置 | ✅ 专属 MCP（与父合并去重） |
+| when_to_use | ❌ | ✅ LLM 路由提示 |
+
+---
+
+#### 7.2 注册表 (`agents/registry.py`)
+
+##### `AgentRegistry` 类
+
+多来源分层存储，四层优先级链（低→高）：`builtin` < `plugin` < `project` < `user`。
+
+```python
+class AgentRegistry:
+    def __init__(self) -> None: ...
+```
+
+**方法**
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `register` | `register(definition: AgentDefinition, source: str = "project") -> AgentDefinition` | 在指定层注册。同层同名覆盖。返回 definition 支持链式调用。 |
+| `unregister` | `unregister(agent_type: str, source: str \| None = None) -> None` | 注销。`source=None` 时清除所有层。 |
+| `get` | `get(agent_type: str) -> AgentDefinition` | 优先级链合并后返回。未找到抛 `KeyError`。 |
+| `list_all` | `list_all() -> dict[str, AgentDefinition]` | 所有已知 agent_type 的合并结果。 |
+| `list_by_source` | `list_by_source(source: str) -> dict[str, AgentDefinition]` | 返回特定层的原始定义（不合并）。 |
+| `contains` | `contains(agent_type: str) -> bool` | 是否存在该 agent_type。 |
+
+**优先级链合并算法 (`_merge`)**
+
+```
+输入: [builtin_def, project_def, user_def]  ← 低→高优先级
+输出: 合并后的 AgentDefinition
+
+预处理:
+  对每层调用 layer.model_dump(exclude_unset=True)
+  仅显式设置过的字段参与合并（避免默认值误覆盖）
+
+规则:
+1. agent_type 不变（所有层必须一致）
+2. 标量字段 → 最高「显式设置」层覆盖（when_to_use, system_prompt, model,
+   permission_mode, memory, background）
+3. tools / skills / hooks → 最高「显式设置」层覆盖
+4. disallowed_tools / auto_approve_tools → 所有层取并集
+5. mcp_servers → 浅合并（高优先级同名 key 覆盖）
+```
+
+**便捷函数**（委托到模块级 `_default_registry` 单例）
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `register_agent` | `register_agent(definition, *, source="project") -> AgentDefinition` | 装饰器/直接调用两用。内置 Agent 用直接调用：`register_agent(my_def, source="builtin")` |
+| `get_agent` | `get_agent(agent_type: str) -> AgentDefinition` | 从全局注册表查询合并后的定义。未找到抛 `KeyError`。 |
+| `list_agents` | `list_agents() -> dict[str, AgentDefinition]` | 列出全局注册表中所有合并后的定义。 |
+
+**使用示例**
+
+```python
+from agent_core import AgentDefinition, get_agent, list_agents, register_agent
+
+# 直接注册
+my_agent = AgentDefinition(
+    agent_type="my-reviewer",
+    when_to_use="When code changes need review",
+    tools=["Read", "Glob", "Grep"],
+    system_prompt="You are a code reviewer...",
+)
+register_agent(my_agent, source="project")
+
+# 查询
+explore = get_agent("Explore")
+print(explore.tools)  # → ["Read", "Glob", "Grep"]
+
+# 列出所有
+for name, d in list_agents().items():
+    print(f"{name}: {d.when_to_use}")
+```
+
+---
+
+#### 7.3 内置 Agent (`agents/builtin/`)
+
+三个内置 Agent 在模块 import 时通过直接调用 `register_agent(definition, source="builtin")` 注册。
+
+##### GeneralPurpose
+
+```python
+AgentDefinition(
+    agent_type="GeneralPurpose",
+    when_to_use="General-purpose agent for any task that doesn't require a specialist.",
+    tools=["*"],
+    system_prompt="You are a general-purpose assistant.",
+    permission_mode=None,       # 继承父级
+    memory=AgentMemory.NONE,
+)
+```
+
+| 属性 | 值 |
+|------|-----|
+| tools | `["*"]`（全部工具，与父级求交） |
+| permission_mode | `None`（继承父级） |
+| auto_approve_tools | `[]` |
+| 用途 | 默认 Agent，不特化 |
+
+##### Explore
+
+```python
+AgentDefinition(
+    agent_type="Explore",
+    when_to_use=(
+        "Subagent used whenever the task requires searching across multiple "
+        "files, directories, or patterns..."
+    ),
+    tools=["Read", "Glob", "Grep"],
+    system_prompt="You are a code exploration specialist...",
+    permission_mode=None,       # 继承父级；只读免批准由引擎第 6 步保证
+    memory=AgentMemory.LOCAL,
+)
+```
+
+| 属性 | 值 |
+|------|-----|
+| tools | `["Read", "Glob", "Grep"]`（仅只读） |
+| permission_mode | `None`（继承父级） |
+| auto_approve_tools | `[]`（只读工具自动通过引擎第 6 步，无需预授权） |
+| 用途 | 代码库探索，被频繁调用 |
+
+##### Plan
+
+```python
+AgentDefinition(
+    agent_type="Plan",
+    when_to_use=(
+        "Subagent used before writing any code..."
+    ),
+    tools=["Read", "Glob", "Grep"],
+    system_prompt="You are a planning specialist...",
+    permission_mode=None,
+    memory=AgentMemory.LOCAL,
+)
+```
+
+| 属性 | 值 |
+|------|-----|
+| tools | `["Read", "Glob", "Grep"]`（仅只读） |
+| permission_mode | `None`（继承父级） |
+| auto_approve_tools | `[]` |
+| 用途 | 前置规划，产出文本计划 |
+
+**只读免批准的真正机制**：Explore/Plan 之所以「无需用户批准」，**不是**因为 `permission_mode`，而是因为它们只持有 `is_read_only=True` 的工具（`Read`/`Glob`/`Grep`），命中 `PermissionEngine` 判定链第 6 步「只读兜底」——该步**与 mode 无关**，在任何父模式下都直接放行。
+
+---
+
+#### 7.4 加载器 (`agents/loader.py`)
+
+所有加载器返回 `AgentDefinition | None`，解析失败时返回 `None`（不抛异常）。
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `load_markdown_definition` | `load_markdown_definition(file_path: str) -> AgentDefinition \| None` | 从 `.md` 文件 YAML frontmatter 解析。依赖 `python-frontmatter`。无 `agent_type` 的 frontmatter 返回 `None`（debug 级日志静默跳过）。 |
+| `load_json_definition` | `load_json_definition(file_path: str) -> AgentDefinition \| None` | 从 `.json` 文件解析。解码/校验失败返回 `None` + warning。 |
+| `discover_agents` | `discover_agents(directory: str, source: str = "project", include_plain_md: bool = False) -> dict[str, AgentDefinition]` | 递归扫描目录。默认仅识别 `<name>.agent.md` 和 `<name>.agent.json`。`include_plain_md=True` 时也尝试裸 `.md`。同 agent_type 冲突时优先级 `.agent.md` > `.agent.json` > `.md`，warning 日志记录。 |
+
+**Markdown frontmatter 格式示例**
+
+```markdown
+---
+agent_type: code-reviewer
+when_to_use: "When code changes need review"
+tools:
+  - Read
+  - Glob
+  - Grep
+disallowed_tools:
+  - Bash
+system_prompt: |
+  You are a code reviewer...
+permission_mode: ask
+model: anthropic/claude-haiku-4-5
+---
+
+# Code Reviewer (body text ignored)
+```
+
+**JSON 格式示例**
+
+```json
+{
+  "agent_type": "code-reviewer",
+  "when_to_use": "When code changes need review",
+  "tools": ["Read", "Glob", "Grep"],
+  "system_prompt": "You are a code reviewer..."
+}
+```
+
+**发现路径约定**
+
+| 来源 | 路径 |
+|------|------|
+| 项目级 | `<workspace_root>/.agent/agents/` |
+| 用户级 | `~/.agent/agents/` |
+
+---
+
+#### 7.5 公开导出 (`agent_core/__init__.py` 增量)
+
+```python
+from agent_core import (
+    AgentDefinition,
+    AgentMemory,
+    get_agent,
+    list_agents,
+    register_agent,
+)
+```
+
+其余模块（registry/loader/builtin）为内部实现，通过 `agents/__init__.py` 聚合后对调用方暴露。
+
+---
+
+#### 7.6 消费契约实现 (`agents/resolve.py`)
+
+上述 5 条契约已落地为 6 个纯函数，由 `run_agent()`（Item 8）调用。全部无副作用、可独立测试。
+
+**实现文件**: `src/agent_core/agents/resolve.py`
+
+| 函数 | 签名 | 说明 |
+|------|------|------|
+| `resolve_agent_tools` | `(definition, parent_allowed, parent_disallowed) -> tuple[frozenset, frozenset]` | 返回 (child_allowed, child_disallowed)。`tools=["*"]` 展开为父 allowed；disallowed 取 ∪ 并集；allowed 扣掉 disallowed。 |
+| `build_child_engine` | `(definition, parent_mode, parent_disallowed) -> PermissionEngine` | 构建子引擎：mode 经 `compute_child_permission_mode` 钳制；`auto_approve_tools` 过滤掉父禁用项后编译为 `priority=0` 的 `PermissionRule(action="allow")`。 |
+| `merge_mcp_servers` | `(definition, parent_mcp) -> dict[str, McpServerConfig]` | 浅合并，子覆盖父同名 key。 |
+| `build_child_system_prompt` | `(definition, parent_system, tool_names) -> str` | 拼接 `{子 prompt}\n{工具列表}\n{父 prompt}`。 |
+| `resolve_model` | `(definition, parent_model_id) -> ModelId` | `definition.model=None` 继承父模型，否则 `ModelId.parse`。 |
+| `disallow_agent_at_depth_limit` | `(allowed, depth) -> frozenset[str]` | 深度 ≥ `MAX_AGENT_DEPTH` (3) 时从 allowed 中剔除 `"Agent"`，防止无限递归。 |
+
+**安全不变量**（由 `inheritance.py` + `resolve.py` 保证）:
+- 子 Agent **永远不能**提升自身权限（`min(父, 子)` 钳制）
+- 子 Agent **永远不能**使用父禁止的工具（`disallowed_tools` 取并集）
+- 子 Agent **只能**使用父子双方都允许的工具（`tools` 取交集）
+- `auto_approve_tools` 中的工具若父禁用则不编入 allow 规则
+
+**单元测试**: `tests/unit/test_agent_resolve.py` (27 个测试：工具池过滤/交集/∪并集/dedup/空交集/权限构建/auto_approve 编译/父禁用排除/mode 钳制/继承/MCP 合并/SystemPrompt 拼接/模型继承/模型覆盖/深度闸)。
+
+---
+
+### 8. 子Agent 执行引擎 & AgentTool — 已实现
 
 **功能**: `run_agent()` 异步生成器（隔离执行环境 + 独立 MCP + 独立 System Prompt + sidechain 转录），`AgentTool` 让 LLM 通过 tool_use 创建子 Agent（同步/异步/Fork/恢复）。
 
-**原因**: 复杂任务需要拆解并行执行。这是全库最复杂的模块——涉及隔离、并发、Fork prompt cache 复用、异步通知、中断恢复。需要 4-5 天充分打磨。
+**实现文件**:
 
-- [ ] `run_agent()` 异步生成器：
-  - agent_id 生成（uuid4）
-  - 模型解析：AgentDefinition.model > AgentConfig.model > 父 Agent 当前模型
-  - 隔离 ToolUseContext 创建（`copy.deepcopy` read_file_state，新 abort_signal）
-  - Agent 专属 MCP 服务器初始化（与父 Agent 合并去重，同名 server 子覆盖父）
-  - Agent 专属 System Prompt 构建（AgentDefinition.system_prompt + tool 列表注入）
-  - 权限模式计算（子 Agent 权限 = min(父级实际权限, AgentDefinition 声明的权限)，不可提升）
-  - SubagentStart hooks 执行
-  - frontmatter skills 预加载（追加为 system context）
-  - `resolve_agent_tools()` 工具池过滤：
-    - allow = AgentDefinition.tools ∩ 父 Agent allowed_tools
-    - disallow = AgentDefinition.disallowed_tools ∪ 父 Agent disallowed_tools
-    - `["*"]` → 展开为父 Agent 全部 allowed tools
-  - 调用 `query()` 执行主循环 → sidechain JSONL 逐行记录
-  - `finally` 清理：MCP 连接断开 / hooks 注销 / 临时文件清理
-- [ ] 消息 fork 预处理（`filter_incomplete_tool_calls()`）：fork 场景下过滤父消息中 tool_use 无对应 tool_result 的块
-- [ ] `AgentTool` — 让 LLM 通过 tool_use 块创建子 Agent：
-  - 输入 schema：`{description, prompt, subagent_type?, run_in_background?, isolation?}`
-  - 路由逻辑：subagent_type → AgentDefinition 查找 → fork 路径 → 标准子 Agent
-  - 同步模式：内联迭代 `run_agent()` generator，实时 yield 子 Agent 的 messages
-  - 异步模式：`asyncio.create_task(run_async_lifecycle())`，立即返回 `{status: "async_launched", agent_id}`
-  - Auto-background：同步 Agent 超过 120s 自动转后台
-- [ ] 异步 Agent 生命周期管理：
-  - 进度追踪：token count / tool use count / 最近 activity 描述
-  - 后台摘要：每 30s 用一次独立 query 生成 3-5 词进度摘要
-  - `finalize_agent_tool()` → 提取最终结果 + 用量统计
-  - `enqueue_agent_notification()` → 生成 XML `<task-notification>` → 父 Agent 下一轮以 user message 形式收到
-  - Agent 完成/失败/被杀 → 对应状态转换 + 通知
-- [ ] Agent 恢复：`resume_agent(agent_id)` → 从 JSONL 加载 transcript → 重建 ToolUseContext → `run_agent()` 继续
-- [ ] Fork Agent：子 Agent 继承父 Agent 完整对话上下文，共享 Anthropic prompt cache（父 Agent system prompt + messages prefix 与子 Agent 字节一致）
+| 文件 | 职责 |
+|------|------|
+| `src/agent_core/agents/run.py` | `run_agent()` 核心执行引擎 (~250 行) |
+| `src/agent_core/agents/tool.py` | `AgentTool` — LLM 可调用的 tool_use 实现 (~240 行) |
+| `src/agent_core/agents/lifecycle.py` | 异步生命周期管理 + 进度摘要 + 通知 (~160 行) |
+| `src/agent_core/agents/fork.py` | Fork/恢复逻辑 + `filter_incomplete_tool_calls` (~130 行) |
+| `src/agent_core/agents/resolve.py` | 消费契约纯函数 (§7.6) |
+| `src/agent_core/session/state.py` | `SessionState` — 跨 prompt 对话历史 + 权限记忆延续 |
+
+**测试文件**:
+
+| 文件 | 说明 |
+|------|------|
+| `tests/unit/test_agent_resolve.py` | 27 个单元测试（工具池/权限/MCP/SysPrompt/模型/深度） |
+| `tests/unit/test_agent_tool.py` | 9 个单元测试（输入校验/属性/路由拒绝/深度闸/模型别名） |
+| `tests/unit/test_agent_lifecycle.py` | 10 个单元测试（状态/完成/通知 XML/XML 转义/进度摘要） |
+| `tests/unit/test_agent_fork.py` | 6 个单元测试（不完整 tool_use 过滤/空 assistant 移除/Fork 不可变） |
+| `tests/unit/test_session_state.py` | SessionState 快照/记录/清空 |
+
+#### 8.1 `run_agent()` — 子 Agent 核心执行引擎 (`agents/run.py`)
+
+```python
+async def run_agent(
+    prompt: str,
+    definition: AgentDefinition,
+    *,
+    parent_config: AgentConfig,
+    parent_trace_id: str,
+    parent_permission_callback: PermissionCallback | None = None,
+    parent_messages: list[dict[str, Any]] | None = None,
+    parent_system: str = "",
+    parent_allowed_tools: frozenset[str] | None = None,
+    parent_disallowed_tools: frozenset[str] | None = None,
+    parent_mcp_servers: dict[str, McpServerConfig] | None = None,
+    parent_context: ToolUseContext | None = None,
+) -> AsyncGenerator[AgentMessage, None]:
+```
+
+**执行流程**:
+
+1. **配置解析** — `resolve_model()` 确定模型；`resolve_agent_tools()` 计算 (allowed, disallowed)；`disallow_agent_at_depth_limit()` 深度闸；`compute_child_permission_mode()` 权限钳制；`build_child_engine()` 构造权限引擎
+2. **隔离环境** — 创建独立 `ToolUseContext`（`copy.deepcopy` read_file_state，新 `abort_signal`）；独立 `ToolRegistry`（仅允许的工具）；子 `AgentConfig`（权限模式、MCP）；子权限回调 wrapper
+3. **open sidechain** — 在 `~/.agent/sessions/{parent_trace_id}/{agent_id}.jsonl` 异步 append
+4. **调用 `query()`** — 传入 `system`（§2.4 拼好的子 prompt）和 `initial_messages`（fork 路径）；聚合同一 turn 的 `assistant_text` + `tool_use` → 一条 assistant chat message → 写入 sidechain
+5. **finally 清理** — flush + close sidechain 文件
+
+#### 8.2 `AgentTool` — LLM 可调用的子 Agent 工具 (`agents/tool.py`)
+
+继承 `Tool` 基类，通过 `@register_tool` 注册到全局 `_default_registry`。
+
+```python
+class AgentTool(Tool):
+    name = "Agent"
+    is_concurrency_safe = False
+    is_read_only = False
+    is_destructive = True     # 子 Agent 可能执行写操作
+```
+
+**Input Schema** (`AgentInput` Pydantic 模型):
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `description` | `str` | **(必填)** | 3-5 词任务简述 |
+| `prompt` | `str` | **(必填)** | 子 Agent 任务 prompt |
+| `subagent_type` | `str` | `"GeneralPurpose"` | Agent 类型名（`Explore`/`Plan`/`GeneralPurpose`） |
+| `model` | `str \| None` | `None` | 模型别名覆写（`"sonnet"`/`"opus"`/`"haiku"`） |
+| `run_in_background` | `bool` | `False` | 后台异步执行 |
+
+**模型别名映射**:
+
+```python
+_MODEL_ALIASES = {
+    "sonnet": "anthropic/claude-sonnet-4-5",
+    "opus":   "anthropic/claude-opus-4-7",
+    "haiku":  "anthropic/claude-haiku-4-5",
+}
+```
+
+**路由逻辑**:
+- 深度检查：`agent_depth >= MAX_AGENT_DEPTH` → 拒绝 + error
+- 查找 `AgentDefinition`：未知 `subagent_type` → `KeyError` error
+- 模型别名翻译：短名 → 完整 `provider/model`
+- 同步路径（`_run_sync`）：内联迭代 `run_agent()`，聚合文本返回
+- 异步路径（`_run_async`）：`run_async_lifecycle()` 作为 tracked task 启动，立即返回 `{"status":"async_launched","agent_id":"..."}`
+
+**BackgroundAgentRegistry**: 每个 `ToolUseContext` 可关联一个注册表，跟踪 in-flight 后台任务，`drain()` 等待全部完成。
+
+**递归约束**: `MAX_AGENT_DEPTH=3`。`AgentTool.call()` 和 `disallow_agent_at_depth_limit()` 双重把关。
+
+#### 8.3 异步生命周期 (`agents/lifecycle.py`)
+
+```python
+@dataclass
+class AgentLifecycleState:
+    agent_id: str
+    status: Literal["running", "completed", "failed", "killed"] = "running"
+    total_tokens: int = 0
+    tool_use_count: int = 0
+    latest_activity: str = "Initializing..."
+    started_at: float
+    completed_at: float | None = None
+    result: str = ""
+    error: str | None = None
+```
+
+**核心函数**:
+
+| 函数 | 说明 |
+|------|------|
+| `run_async_lifecycle(agent_id, definition, prompt, context)` | 后台完整生命周期：消费 `run_agent()` stream → 更新 state → `finalize` → `enqueue` |
+| `_progress_summarizer(state, interval=30.0)` | 每 30s 从 `state.recent_texts` 提取 3-5 词摘要 |
+| `finalize_agent_tool(state)` | 设置 `completed_at`，结果回填 |
+| `enqueue_agent_notification(state, queue)` | 生成 XML `<task-notification>`（含 `agent_id`/`status`/`total_tokens`/`result`），XML 转义动态文本，追加到父级 `notification_queue` |
+
+**通知格式**:
+```xml
+<task-notification>
+  <agent_id>abc123</agent_id>
+  <status>completed</status>
+  <total_tokens>1234</total_tokens>
+  <result>All tests passed</result>
+</task-notification>
+```
+
+父 Agent 的 `query()` 主循环每轮开始时检查 `notification_queue`，非空则作为 user message 注入 `messages`。
+
+#### 8.4 Fork & 恢复 (`agents/fork.py`)
+
+| 函数 | 说明 |
+|------|------|
+| `filter_incomplete_tool_calls(messages)` | 扫描所有 `tool_use`/`tool_result` block，移除无对应 `tool_result` 的 `tool_use`，删除变空的 assistant 消息。返回新列表不修改输入。 |
+| `fork_messages(parent_messages)` | `filter_incomplete_tool_calls(list(parent_messages))` 的便捷封装 |
+| `resume_agent(agent_id, sidechain_path, definition, ...)` | 从 sidechain JSONL 加载 transcript → 重建 messages → `run_agent()` 继续。`read_file_state` 重置为 `{}`（stale 标记）。 |
 
 ---
 
-### 9. Hooks + Plugin + Skills 系统 (2 天)
+### 9. Hooks + Plugin + Skills 系统 (2 天) — ⬜ 待实现
 
 **功能**: Hook 管线（可阻断/可修改输出），Plugin 热插拔注册表，Skill 定义与执行（inline / fork 两种模式）。
 
@@ -2152,38 +2624,53 @@ from agent_core.mcp import (
 
 **原因**: 对话需要跨进程存活。JSONL 是 append-only 格式，安全简单，崩溃时最多丢失最后一行。
 
+> **详细设计**: 见 [plan/session-state-and-history-plan.md](./plan/session-state-and-history-plan.md) §3（Phase B）。本条目 = 该计划的 **Phase B**（落盘 + 恢复）。
+
+> **前置依赖（Phase A，必须先做）**: 同计划 §2 的**会话运行时层 `SessionState`**（内存中跨 prompt 的对话历史延续）。当前 REPL 每个 prompt 独立、历史不延续（`run_query` 累积 `messages` 但 `DoneMessage` 不回吐、`cli._repl` 不传 `initial_messages`）。Phase B 的落盘以 `SessionState.messages` 为唯一事实源——没有它，落盘无源可写。`SessionState` 同时持有会话权限记忆（见 [plan/permission-session-scope-plan.md](./plan/permission-session-scope-plan.md)），三者建议合并实施。
+
+**Phase A — 会话运行时层（前置）** — ✅ 已实现
+- [x] `src/agent_core/session/state.py`：`SessionState`（`session_id` / `messages` / `permission_store` / `transcript_path`）
+- [x] `DoneMessage` 增 `final_messages` 字段；`run_query` 各 `yield DoneMessage` 回吐轮末 `messages`
+- [x] `Agent(config, session=None)`；`stream` 注入 `initial_messages` + 回写 `session.messages`
+- [x] `cli._repl` 循环外创建 `SessionState` 并注入每个 Agent；`/clear` 清空历史
+- [x] 会话权限记忆（`SessionPermissionStore`）挂载于 `SessionState.permission_store`，注入链贯通
+- [~] `run.py` 父历史来源：当前子 Agent 仍由 `parent_context.messages` 提供（语义不变），未额外改动
+
+**Phase B — 落盘 & 恢复（本条目主体）**
 - [ ] 存储路径：`~/.agent/projects/{project_hash}/{session_id}.jsonl`
-- [ ] Sidechain 路径：`~/.agent/projects/{project_hash}/{session_id}/{agent_id}.jsonl`
-- [ ] 写入策略：每轮 assistant message + tool_result 完成后 `aiofiles` append 一行
-- [ ] 消息序列化格式：每行 `{"role": ..., "content": [...], "timestamp": ..., "turn": N}`
+- [ ] Sidechain 路径：`~/.agent/projects/{project_hash}/{session_id}/{agent_id}.jsonl`（复用现有 `run.py` sidechain）
+- [ ] 写入策略：每条 message 产生时 `aiofiles` append 一行；writer 挂在 `SessionState` 单一写入口
+- [ ] 消息序列化格式（同构 cc-haha）：每行 `{"uuid", "parentUuid", "sessionId", "timestamp", "isSidechain", "message": {role, content}}`；`parentUuid` 串成链（v1 线性，预留 fork/branch）
 - [ ] 会话列表：扫描存储目录 → 按 mtime 排序 → 提取首条 user message 作为标题
-- [ ] 会话恢复：加载 JSONL → 重建 `ToolUseContext`（read_file_state 失效标记）→ `query()` 继续
+- [ ] 会话恢复：读 JSONL → 按 `parentUuid` chain-walk 到 leaf → **清洗**（`filter_unresolved_tool_uses` 丢弃未配对 tool_use、`filter_orphaned_thinking`、`detect_turn_interruption` 检测 mid-turn 中断并可注入 "Continue…"）→ 反序列化 → 塞入新 `SessionState.messages` → 重建 `ToolUseContext`（read_file_state 失效标记）→ `query()` 继续
 - [ ] 格式迁移：`migrate_transcript()` 函数，version 字段驱动，旧格式自动升级
 - [ ] 会话删除 / 清理：删除对应 JSONL 文件，清理 sidechain 子目录
+- [ ] CLI：`--resume <id>` / `--continue`（最近会话）/ `/sessions`（列表）
 
 ---
 
-### 11. 测试、文档 & 发布 (2 天)
+### 11. 测试、文档 & 发布 (2 天) — 部分实现
 
 **功能**: 多层测试（单元 + mock 集成 + vcrpy 录制回放），MkDocs API 文档，PyPI 发布配置。
 
 **原因**: 可被第三方依赖的库需要可信的测试覆盖。vcrpy 覆盖 LLM 调用确定性场景，mock model 覆盖并发/竞态/隔离逻辑，两者互补。
 
-- [ ] **单元测试**（pytest）：每个 Tool 的 validate_input / call / 边界条件
-- [ ] **mock model 集成测试**（不依赖真实 API）：
-  - 实现一个 `MockModel` 产出预定义的 tool_use 序列
-  - 测试并发工具管线（多 tool_use 并行执行，验证 Semaphore 并发控制）
-  - 测试子 Agent sidechain 隔离（两个子 Agent 并行写 JSONL 不互相干扰）
-  - 测试 Fork Agent 消息预处理（filter_incomplete_tool_calls）
-  - 测试权限继承链（父禁止 Bash → 子 Agent 的 tools=["*"] → Bash 被过滤）
-  - 测试异步 Agent 完成通知（XML task-notification 格式正确性）
-- [ ] **vcrpy 录制回放测试**（需要一次真实 API key 录制）：
-  - 工具搜索 → 代码读取 → 代码修改的端到端 turn flow
-  - max_output_tokens 恢复场景
-  - 自动压缩触发场景
+- [x] **单元测试**（pytest） — 现有 ~702 个单元测试（45 个测试文件），覆盖：
+  - 每个 Tool 的 validate_input / call / 边界条件
+  - AgentConfig / ModelId / AgentMessage 模型校验
+  - AgentDefinition / AgentRegistry / 加载器 / 内置 Agent
+  - PermissionEngine（7 步链）/ SessionPermissionStore / 权限继承 / Bash AST
+  - TokenBudget / hard_truncate / enrich_context
+  - Anthropic / OpenAI / DeepSeek provider 客户端
+  - 压缩触发 / 提示词 / 一致性验证
+  - Agent 生命周期 / Fork / resolve / AgentTool
+  - SessionState
+- [x] **mock model 集成测试**（已实现 `MockModel` + `tests/integration/`）：`test_query_loop.py`（单轮/多轮/max_turns/error）、`test_tool_pipeline.py`（并发/串行）、`test_compression.py`（query loop 压缩路径）
+- [ ] **vcrpy 录制回放测试** — 桩已创建（`tests/e2e/test_turn_flow.py` / `test_compression.py`），未录制
+- [ ] **Mock 集成测试补齐**: `test_subagent.py` / `test_fork.py` / `test_permission_inheritance.py` 占位桩
 - [ ] MkDocs Material API 文档搭建
 - [ ] `pyproject.toml` + GitHub Actions PyPI 发布 workflow
-- [ ] README 包含快速开始示例（Agent.run / Agent.stream / 权限回调 / 会话恢复 四个最小示例）
+- [ ] README 包含快速开始示例
 
 ---
 
@@ -2192,14 +2679,15 @@ from agent_core.mcp import (
 | 阶段 | 条目 | 预估天数 | 状态 |
 |------|------|----------|------|
 | Phase 1: 基础设施 | #1 脚手架 (2) + #2 Tool 框架 (2) + #3 多Provider集成 (3) | 7 | ✅ 已完成 |
-| Phase 2: Agent 核心循环 | #4 主循环 (4) + CLI测试入口 (1) | 5 | ✅ 已完成 |
-| Phase 2: 工具管线 & 权限 | #5 管线+权限系统 (4) | 4 | ✅ 已完成 |
-| Phase 2: 剩余 | #5.5 压缩 (2) | 2 | ✅ 已完成 |
-| Phase 2: 剩余 | #6 MCP (2) | 2 | ✅ 已完成 |
-| Phase 3: 子Agent 定义 | #7 Agent 定义 (2) | 2 | ✅ 已完成（执行引擎见 #8） |
-| Phase 3: 子Agent & 扩展 | #8 执行引擎 (5) + #9 Hooks/Plugin/Skills (2) | 7 | ⬜ 待实现 |
-| Phase 4: 持久化 & 收尾 | #10 持久化 (2) + #11 测试/文档/发布 (2) | 4 | ⬜ 待实现 |
-| **总计** | **13 条目** | **33 天 (~7 周)** | 已实现 ~60% |
+| Phase 2: Agent 核心循环 | #4 主循环 (4) + CLI测试入口 (1) + #5 工具管线+权限 (4) | 9 | ✅ 已完成 |
+| Phase 2: 压缩 & MCP | #5.5 压缩 (2) + #6 MCP (2) | 4 | ✅ 已完成 |
+| Phase 3: Agent 定义 | #7 Agent 定义 (2) | 2 | ✅ 已完成 |
+| Phase 3: 执行引擎 | #8 执行引擎+AgentTool+生命周期+Fork (5) | 5 | ✅ 已完成 |
+| Phase 3: 扩展 | #9 Hooks/Plugin/Skills (2) | 2 | ⬜ 待实现 |
+| Phase 4: 持久化 | #10 会话运行时层 Phase A (1.5) | 1.5 | ✅ 已完成 |
+| Phase 4: 持久化 | #10 落盘+恢复 Phase B (2) | 2 | ⬜ 待实现 |
+| Phase 4: 收尾 | #11 测试补齐+文档+发布 (2) | 2 | 🔶 部分完成（测试 ~80%，文档/发布 0%） |
+| **总计** | **13 条目** | **34.5 天 (~7 周)** | 已完成 ~70% |
 
 ---
 
@@ -2245,114 +2733,113 @@ agent-core/
 │       ├── __init__.py             # 公开 API: Agent, AgentConfig, AgentResult, AgentMessage, ModelProvider, ModelId
 │       │
 │       ├── agent.py                # Agent 主类 (run / stream / on_permission_check)
-│       ├── config.py               # AgentConfig pydantic 模型 + 校验
-│       ├── result.py               # AgentResult / AgentMessage / stop_reason 枚举
+│       ├── models.py               # 所有 Pydantic 数据模型 (AgentConfig, AgentResult, AgentMessage, AgentDefinition, 等)
+│       ├── cli.py                  # 交互式 REPL 测试入口
+│       │
+│       ├── agents/                 # Agent 定义 + 执行引擎（详见第 7-8 节）
+│       │   ├── __init__.py         # 公开导出 + 触发内置 Agent 注册
+│       │   ├── definition.py       # AgentDefinition Pydantic 模型 + AgentMemory 枚举
+│       │   ├── registry.py         # AgentRegistry 四层优先级链 + 合并算法
+│       │   ├── loader.py           # markdown frontmatter / JSON 加载器 + 目录发现
+│       │   ├── resolve.py          # §7.6 消费契约（工具池过滤/权限/MCP/SysPrompt/模型/深度闸）
+│       │   ├── run.py              # §8.1 run_agent() 子 Agent 核心执行引擎
+│       │   ├── tool.py             # §8.2 AgentTool — LLM 可调用的子 Agent 工具
+│       │   ├── lifecycle.py        # §8.3 异步生命周期管理 + 通知
+│       │   ├── fork.py             # §8.4 Fork/恢复 + filter_incomplete_tool_calls
+│       │   └── builtin/            # 内置 Agent 定义
+│       │       ├── __init__.py     # import 触发注册
+│       │       ├── general.py      # GeneralPurpose
+│       │       ├── explore.py      # Explore
+│       │       └── plan.py         # Plan
 │       │
 │       ├── query/                  # Agent 主循环
 │       │   ├── __init__.py
-│       │   ├── loop.py             # query() 异步生成器 (turn 循环核心)
+│       │   ├── loop.py             # query() 异步生成器 (turn 循环核心 + 工具执行管线)
 │       │   ├── budget.py           # Token 预算管理 + 收益递减检测
-│       │   ├── context.py          # 上下文富化 (git status, 日期, AGENTS.md)
+│       │   ├── context.py          # 上下文富化 (git status, 日期)
 │       │   └── truncate.py         # 硬截断逻辑
 │       │
 │       ├── tools/                  # 工具系统
 │       │   ├── __init__.py         # Tool 注册表 + @register_tool 装饰器
-│       │   ├── base.py             # Tool 抽象基类 / ToolUseContext / ToolResult
-│       │   ├── schema.py           # Pydantic → JSON Schema 自动生成
-│       │   ├── builtin/
-│       │   │   ├── __init__.py     # 注册所有内置工具
-│       │   │   ├── read.py         # FileReadTool
-│       │   │   ├── glob.py         # GlobTool
-│       │   │   ├── grep.py         # GrepTool
-│       │   │   ├── edit.py         # FileEditTool
-│       │   │   ├── write.py        # FileWriteTool
-│       │   │   └── bash.py         # BashTool
-│       │   └── agent_tool/         # AgentTool (子Agent 创建)
-│       │       ├── __init__.py
-│       │       ├── tool.py         # AgentTool 实现 (call / 路由 / 同步异步分发)
-│       │       ├── runner.py       # run_agent() 异步生成器
-│       │       ├── lifecycle.py    # run_async_lifecycle / finalize_agent_tool
-│       │       ├── fork.py         # Fork Agent (共享 prompt cache)
-│       │       └── resume.py       # resume_agent (从 JSONL 恢复)
+│       │   ├── base.py             # Tool 抽象基类 / ToolUseContext / ToolCallResult
+│       │   ├── registry.py         # ToolRegistry 注册表类
+│       │   ├── _io.py              # 文件 I/O 共享工具 (指纹, 原子写入, 编码检测, workspace 检查)
+│       │   ├── file_read.py        # FileReadTool (Read)
+│       │   ├── file_edit.py        # FileEditTool (Edit)
+│       │   ├── file_write.py       # FileWriteTool (Write)
+│       │   ├── glob_tool.py        # GlobTool (Glob)
+│       │   ├── grep_tool.py        # GrepTool (Grep)
+│       │   └── bash.py             # BashTool (Bash)
 │       │
 │       ├── permissions/            # 权限系统
 │       │   ├── __init__.py
-│       │   ├── engine.py           # 权限规则引擎 (匹配链)
-│       │   ├── rules.py            # 规则 pydantic model + 持久化
+│       │   ├── engine.py           # 权限规则引擎 (7 步匹配链) + PermissionOutcome 枚举
+│       │   ├── rules.py            # 规则 pydantic 模型 + default_rules()
+│       │   ├── store.py            # SessionPermissionStore (会话级权限记忆)
 │       │   ├── inheritance.py      # 子Agent 权限继承 (min / 并集 / 交集)
 │       │   └── bash_guard.py       # Bash AST 安全检查 (tree-sitter)
 │       │
-│       ├── hooks/                  # Hooks 系统
+│       ├── hooks/                  # ⬜ Hooks 系统 (待实现 — Item 9)
 │       │   ├── __init__.py
 │       │   ├── types.py            # Protocol 定义 (Pre/Post/Stop/SubagentStart)
 │       │   ├── registry.py         # Hook 注册表 (全局 + 项目级)
 │       │   └── pipeline.py         # 管线执行器 (PreToolUse / PostToolUse)
 │       │
+│       ├── session/                # 🔶 会话运行时层 (Phase A 已完成, Phase B 待实现)
+│       │   ├── __init__.py
+│       │   └── state.py            # SessionState (会话历史 + 权限记忆延续)
+│       │
 │       ├── mcp/                    # MCP 协议集成
-│       │   ├── __init__.py
-│       │   ├── client.py           # connect_to_server / fetch_tools
-│       │   ├── config.py           # McpServerConfig + 配置加载链
-│       │   ├── registry.py         # MCP 工具 → Tool 注册表注入
-│       │   └── auth.py             # OAuth 认证流程
+│       │   ├── __init__.py         # 公开导出: McpSessionManager, register_mcp_tools
+│       │   ├── _transport.py       # stdio/SSE/WebSocket transport 适配器
+│       │   ├── auth.py             # OAuth 2.0/2.1 token 管理
+│       │   ├── client.py           # McpSessionManager + McpConnectionState
+│       │   ├── config.py           # 配置加载链: .mcp.json → env 展开 → McpServerConfig
+│       │   ├── registry.py         # MCP 工具 → Tool 子类动态桥接
+│       │   └── resources.py        # MCP Resource/Prompt 获取（预留 Phase 3）
 │       │
-│       ├── agents/                 # Agent 定义系统
-│       │   ├── __init__.py
-│       │   ├── definition.py       # AgentDefinition pydantic 模型
-│       │   ├── registry.py         # 注册表 + 优先级链
-│       │   ├── loader.py           # markdown / JSON / 代码 加载器
-│       │   └── builtin/            # 内置 Agent 定义
-│       │       ├── general.py      # GeneralPurpose
-│       │       ├── explore.py      # Explore
-│       │       └── plan.py         # Plan
+│       ├── llm/                    # LLM 多 Provider 集成
+│       │   ├── __init__.py         # 公开导出 + 触发 @register_client 注册
+│       │   ├── base.py             # BaseClient 抽象 + get_client() 工厂
+│       │   ├── events.py           # InternalEvent 类型定义
+│       │   ├── errors.py           # 错误分类 + 统一重试策略
+│       │   ├── anthropic.py        # AnthropicClient (anthropic SDK)
+│       │   ├── openai.py           # OpenAIClient (openai SDK)
+│       │   └── deepseek.py         # DeepSeekClient (openai SDK)
 │       │
-│       ├── skills/                 # Skills 系统
+│       ├── compression/            # 自动压缩
+│       │   ├── __init__.py
+│       │   ├── trigger.py          # 触发条件判断 + _partition_rounds() 轮次分区
+│       │   ├── summarizer.py       # LLM 摘要生成 + 重试循环
+│       │   ├── consistency.py      # 4 项一致性验证
+│       │   └── prompts.py          # 可自定义的 prompt 模板常量
+│       │
+│       ├── skills/                 # ⬜ Skills 系统 (待实现 — Item 9)
 │       │   ├── __init__.py
 │       │   ├── loader.py           # SKILL.md 扫描 + frontmatter 解析
 │       │   ├── executor.py         # inline / fork 执行
 │       │   └── permissions.py      # Skill 权限匹配
 │       │
-│       ├── plugins/                # Plugin 系统
+│       ├── plugins/                # ⬜ Plugin 系统 (待实现 — Item 9)
 │       │   ├── __init__.py
 │       │   ├── registry.py         # entry_points 发现 + 手动注册
 │       │   └── lifecycle.py        # enable / disable
 │       │
-│       ├── llm/                    # LLM 多 Provider 集成
-│       │   ├── __init__.py
-│       │   ├── base.py             # BaseClient 抽象 + get_client() 工厂
-│       │   ├── events.py           # InternalEvent 类型定义
-│       │   ├── normalize.py        # 消息双向规范化 (inbound/outbound)
-│       │   ├── tool_schema.py      # Tool JSON Schema → Provider 原生格式
-│       │   ├── errors.py           # 错误分类 + 统一重试策略
-│       │   ├── anthropic.py        # AnthropicClient (anthropic SDK)
-│       │   └── openai.py           # OpenAIClient (openai SDK)
-│       │
-│       ├── compression/            # 自动压缩
-│       │   ├── __init__.py
-│       │   ├── trigger.py          # 触发条件判断 (85% 阈值)
-│       │   ├── summarizer.py       # LLM 摘要生成
-│       │   └── consistency.py      # 压缩后一致性验证
-│       │
-│       ├── persistence/            # 会话持久化
+│       ├── persistence/            # ⬜ 会话持久化 (待实现 — Item 10)
 │       │   ├── __init__.py
 │       │   ├── storage.py          # JSONL 读写 (aiofiles)
 │       │   ├── path.py             # 存储路径计算
 │       │   ├── session.py          # 会话列表 / 恢复 / 删除
 │       │   └── migrate.py          # 格式迁移
 │       │
-│       ├── logging/                # 结构化日志
-│       │   ├── __init__.py
-│       │   └── tracer.py           # trace_id 生成 + turn-level 日志记录
-│       │
-│       └── utils/                  # 内部工具
+│       └── logging/                # 结构化日志
 │           ├── __init__.py
-│           ├── file_state.py       # read_file_state 缓存 (dict + mtime)
-│           ├── encoding.py         # 文件编码检测
-│           └── subprocess.py       # asyncio 子进程封装
+│           └── tracer.py           # TurnTracer 结构化日志记录器
 │
 ├── tests/
 │   ├── __init__.py
 │   ├── conftest.py                 # pytest fixtures (default_config, custom_config)
-│   ├── unit/                       # 单元测试 (498 tests)
+│   ├── unit/                       # 单元测试 (~700 tests)
 │   │   ├── conftest.py
 │   │   ├── test_models.py          # AgentConfig / ModelId / CompressionConfig 模型校验
 │   │   ├── test_messages.py        # AgentResult / AgentMessage  discriminated union
@@ -2373,23 +2860,34 @@ agent-core/
 │   │   ├── test_deepseek_provider.py # DeepSeekClient (classify/normalize/convert)
 │   │   ├── test_provider_registry.py # register_client / get_client / retry_config
 │   │   ├── test_permissions.py      # PermissionEngine + 继承 + Bash AST 安全
+│   │   ├── test_permission_store.py # SessionPermissionStore (会话权限记忆)
 │   │   ├── test_loop_helpers.py     # 消息构建器 + run_tool_use / run_tools
 │   │   ├── test_budget.py           # TokenBudget / token 估算 / context window
 │   │   ├── test_truncate.py         # hard_truncate 轮次分区截断
 │   │   ├── test_context.py          # enrich_context / git status 采集
 │   │   ├── test_compression.py      # 压缩触发器/提示词/一致性验证 (unit)
 │   │   ├── test_logging.py          # TurnTracer 结构化日志
-│   │   ├── test_hooks.py            # (桩 — not yet implemented)
-│   │   └── test_normalize.py        # (桩 — not yet implemented)
+│   │   ├── test_agent_definition.py # AgentDefinition 模型/校验/序列化
+│   │   ├── test_agent_registry.py   # AgentRegistry 注册/合并/优先级链
+│   │   ├── test_agent_loader.py     # Markdown/JSON 加载器 + 目录发现
+│   │   ├── test_builtin_agents.py   # 内置 Agent 属性 + 引擎免批准验证
+│   │   ├── test_agent_resolve.py   # §7.6 消费契约（工具池/权限/MCP/SysPrompt/模型/深度）
+│   │   ├── test_agent_tool.py      # AgentTool 输入校验/路由/深度闸/别名
+│   │   ├── test_agent_lifecycle.py # 生命周期状态/通知 XML/进度摘要
+│   │   ├── test_agent_fork.py      # filter_incomplete_tool_calls / Fork 不可变
+│   │   ├── test_session_state.py   # SessionState 快照/记录/清空
+│   │   ├── test_hooks.py            # ⬜ (桩 — Item 9)
 │   ├── integration/                # mock model 集成测试 (无真实 API)
 │   │   ├── conftest.py
 │   │   ├── mock_model.py           # MockClient / make_text_turn / make_tool_use_turn
 │   │   ├── test_query_loop.py      # query() 单轮/多轮/max_turns/error
-│   │   ├── test_tool_pipeline.py   # 并发/串行工具管线
+│   │   ├── test_tool_pipeline.py   # (桩 — not yet implemented)
 │   │   ├── test_compression.py     # compress() + query() loop 压缩路径
 │   │   ├── test_subagent.py        # (桩 — not yet implemented)
 │   │   ├── test_fork.py            # (桩 — not yet implemented)
-│   │   └── test_permission_inheritance.py  # (桩 — not yet implemented)
+│   │   ├── test_permission_inheritance.py  # (桩 — not yet implemented)
+│   │   ├── test_run_agent.py       # (桩 — not yet implemented)
+│   │   └── test_history_continuity.py  # SessionState 跨 prompt 历史延续
 │   └── e2e/                        # vcrpy 录制回放 (需 API key 录制一次)
 │       ├── conftest.py
 │       ├── test_turn_flow.py       # (桩 — not yet implemented)
