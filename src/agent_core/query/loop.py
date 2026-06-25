@@ -76,6 +76,7 @@ async def query(
     hook_registry: Any = None,
     session_id: str | None = None,
     project_hash: str | None = None,
+    recorder: Any = None,
 ) -> AsyncGenerator[AgentMessage, None]:
     """Run the full agent turn loop for a single user prompt.
 
@@ -123,6 +124,7 @@ async def query(
             hook_registry=hook_registry,
             session_id=session_id,
             project_hash=project_hash,
+            recorder=recorder,
         ):
             yield message
     finally:
@@ -172,6 +174,7 @@ async def _run_turns(
     hook_registry: Any = None,
     session_id: str | None = None,
     project_hash: str | None = None,
+    recorder: Any = None,
 ) -> AsyncGenerator[AgentMessage, None]:
     """Run the agent turn loop.
 
@@ -411,7 +414,7 @@ async def _run_turns(
 
         # -- 2b. LLM call ---------------------------------------------------
         try:
-            tracer = TurnTracer(trace_id=trace_id)
+            tracer = TurnTracer(trace_id=trace_id, recorder=recorder)
             raw_stream = client.stream_messages(
                 messages=messages,
                 tools=tools_schema,
