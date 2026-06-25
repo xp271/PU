@@ -1,0 +1,419 @@
+interactions:
+- request:
+    body: '{"max_tokens":4096,"messages":[{"role":"user","content":[{"type":"text","text":"Read
+      the file at /nonexistent/path.txt"}]}],"model":"claude-haiku-4-5","system":"Today''s
+      date is 2026-06-25.\n\n<environment>\n  Platform: win32\n  Shell: C:\\WINDOWS\\system32\\cmd.exe\n  Workspace:
+      C:\\PU\n</environment>\n\n<git_status>\nM .gitignore\n M README.md\n M agent-core-todolist-python.md\n
+      M pyproject.toml\n M tests/e2e/conftest.py\n M tests/e2e/test_compression.py\n
+      M tests/e2e/test_turn_flow.py\n M tests/integration/conftest.py\n D tests/integration/test_fork.py\n
+      D tests/integration/test_permission_inheritance.py\n D tests/integration/test_subagent.py\n
+      D tests/integration/test_tool_pipeline.py\n M uv.lock\n?? .github/\n?? docs/api/agent.md\n??
+      docs/api/permissions.md\n?? docs/api/tools.md\n?? docs/guides/mcp.md\n?? docs/guides/subagent.md\n??
+      docs/index.md\n?? docs/quickstart.md\n?? examples/basic_run.py\n?? examples/permission_callback.py\n??
+      examples/session_resume.py\n?? examples/streaming.py\n?? mkdocs.yml\n?? plan/item-11-test-docs-release-plan.md\n??
+      tests/e2e/cassettes/\n</git_status>","tools":[{"name":"Bash","description":"","input_schema":{"properties":{"command":{"description":"Shell
+      command to execute","title":"Command","type":"string"},"timeout":{"default":120.0,"description":"Timeout
+      in seconds","maximum":600,"minimum":1,"title":"Timeout","type":"number"},"working_dir":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"description":"Working
+      directory for the command","title":"Working Dir"}},"required":["command"],"title":"BashInput","type":"object"}},{"name":"Edit","description":"","input_schema":{"properties":{"file_path":{"description":"Absolute
+      path to the file to edit","title":"File Path","type":"string"},"old_string":{"description":"Exact
+      text to search for and replace","title":"Old String","type":"string"},"new_string":{"description":"Replacement
+      text","title":"New String","type":"string"}},"required":["file_path","old_string","new_string"],"title":"FileEditInput","type":"object"}},{"name":"Read","description":"","input_schema":{"properties":{"file_path":{"description":"Absolute
+      path to the file to read","title":"File Path","type":"string"},"offset":{"default":0,"description":"Line
+      offset to start reading from","minimum":0,"title":"Offset","type":"integer"},"limit":{"default":2000,"description":"Maximum
+      number of lines to read","maximum":10000,"minimum":1,"title":"Limit","type":"integer"},"max_bytes":{"default":500000,"description":"Maximum
+      bytes to read (safety cap)","minimum":1,"title":"Max Bytes","type":"integer"}},"required":["file_path"],"title":"FileReadInput","type":"object"}},{"name":"Write","description":"","input_schema":{"properties":{"file_path":{"description":"Absolute
+      path to the file to create or overwrite","title":"File Path","type":"string"},"content":{"description":"Content
+      to write to the file","title":"Content","type":"string"}},"required":["file_path","content"],"title":"FileWriteInput","type":"object"}},{"name":"Glob","description":"","input_schema":{"properties":{"pattern":{"description":"Glob
+      pattern to match files (e.g. ''**/*.py'')","title":"Pattern","type":"string"},"path":{"default":".","description":"Base
+      directory for glob search","title":"Path","type":"string"}},"required":["pattern"],"title":"GlobInput","type":"object"}},{"name":"Grep","description":"","input_schema":{"properties":{"pattern":{"description":"Regular
+      expression pattern to search for","title":"Pattern","type":"string"},"path":{"default":".","description":"File
+      or directory to search in","title":"Path","type":"string"},"glob":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"description":"Glob
+      pattern to filter files (e.g. ''*.py'')","title":"Glob"},"output_mode":{"default":"files_with_matches","description":"Output
+      mode","enum":["files_with_matches","content","count"],"title":"Output Mode","type":"string"},"head_limit":{"default":100,"description":"Maximum
+      number of output lines","maximum":1000,"minimum":1,"title":"Head Limit","type":"integer"},"offset":{"default":0,"description":"Skip
+      first N matches before applying head_limit","minimum":0,"title":"Offset","type":"integer"},"context_around":{"default":0,"description":"Context
+      lines around match (-C)","maximum":10,"minimum":0,"title":"Context Around","type":"integer"},"ignore_case":{"default":false,"description":"Case
+      insensitive search (-i)","title":"Ignore Case","type":"boolean"},"multiline":{"default":false,"description":"Enable
+      multiline mode (-U --multiline-dotall)","title":"Multiline","type":"boolean"}},"required":["pattern"],"title":"GrepInput","type":"object"}},{"name":"Skill","description":"Tool
+      that lets the LLM execute named skills.\n\n    Skills are pre-loaded from ``.agent/skills/``
+      directories (project\n    and user level) and optionally contributed by plugins.","input_schema":{"description":"Validated
+      input for the ``Skill`` tool.","properties":{"skill":{"description":"Skill name,
+      e.g. ''review-pr''.","title":"Skill","type":"string"},"arguments":{"additionalProperties":{"type":"string"},"description":"Key-value
+      pairs passed to the skill template.","title":"Arguments","type":"object"},"mode":{"anyOf":[{"enum":["inline","fork"],"type":"string"},{"type":"null"}],"default":null,"description":"Override
+      the skill''s default execution mode.","title":"Mode"}},"required":["skill"],"title":"SkillInput","type":"object"}},{"name":"Agent","description":"Tool
+      that lets the LLM create sub-agents for complex multi-step tasks.\n\n    The
+      LLM provides ``description``, ``prompt``, and optionally a\n    ``subagent_type``.  This
+      tool resolves the agent definition, sets\n    up the child execution environment,
+      and routes to either synchronous\n    (inline) or asynchronous (background)
+      execution.","input_schema":{"description":"Validated input for the ``Agent``
+      tool.","properties":{"description":{"description":"A short (3-5 word) description
+      of the task.","title":"Description","type":"string"},"prompt":{"description":"The
+      task for the agent to perform.","title":"Prompt","type":"string"},"subagent_type":{"default":"GeneralPurpose","description":"Agent
+      type, e.g. ''Explore'', ''Plan'', ''GeneralPurpose''.","title":"Subagent Type","type":"string"},"model":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"description":"Optional
+      model override (alias: sonnet/opus/haiku).","title":"Model"},"run_in_background":{"default":false,"description":"Run
+      in background and notify when done.","title":"Run In Background","type":"boolean"}},"required":["description","prompt"],"title":"AgentInput","type":"object"}}],"stream":true}'
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '6603'
+      Content-Type:
+      - application/json
+      Host:
+      - api.deepseek.com
+      User-Agent:
+      - AsyncAnthropic/Python 0.105.2
+      X-Stainless-Arch:
+      - other:amd64
+      X-Stainless-Async:
+      - async:asyncio
+      X-Stainless-Helper-Method:
+      - stream
+      X-Stainless-Lang:
+      - python
+      X-Stainless-OS:
+      - Windows
+      X-Stainless-Package-Version:
+      - 0.105.2
+      X-Stainless-Runtime:
+      - CPython
+      X-Stainless-Runtime-Version:
+      - 3.12.13
+      X-Stainless-Stream-Helper:
+      - messages
+      anthropic-version:
+      - '2023-06-01'
+      x-stainless-read-timeout:
+      - '600'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-timeout:
+      - NOT_GIVEN
+    method: POST
+    uri: https://api.deepseek.com/anthropic/v1/messages
+  response:
+    body:
+      string: 'event: message_start
+
+        data: {"type":"message_start","message":{"id":"84490acf-ca8c-4577-91fc-51d247dc13fe","type":"message","role":"assistant","model":"deepseek-v4-flash","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":90,"cache_creation_input_tokens":0,"cache_read_input_tokens":2048,"output_tokens":0,"service_tier":"standard"}}}
+
+
+        event: content_block_start
+
+        data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}
+
+
+        event: ping
+
+        data: {"type":"ping"}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        user"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        is"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        asking"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        me"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        to"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        read"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        a"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        file"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        at"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        a"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        path"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        that"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        clearly"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        doesn"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"''t"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        exist"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        I"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        should"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        try"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        it"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        and"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        show"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        the"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"
+        error"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"84490acf-ca8c-4577-91fc-51d247dc13fe"}}
+
+
+        event: content_block_stop
+
+        data: {"type":"content_block_stop","index":0}
+
+
+        event: content_block_start
+
+        data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_00_1VCXLYJhr5diEFxdO9QQ2710","name":"Read","input":{}}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\""}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"file"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"_path"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\""}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":":
+        "}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\""}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"/"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"none"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"x"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"istent"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"/p"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ath"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":".txt"}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\""}}
+
+
+        event: content_block_delta
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"}"}}
+
+
+        event: content_block_stop
+
+        data: {"type":"content_block_stop","index":1}
+
+
+        event: message_delta
+
+        data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":90,"cache_creation_input_tokens":0,"cache_read_input_tokens":2048,"output_tokens":77,"service_tier":"standard"}}
+
+
+        event: message_stop
+
+        data: {"type":"message_stop"}
+
+
+        '
+    headers:
+      Connection:
+      - keep-alive
+      Content-Type:
+      - text/event-stream; charset=utf-8
+      Date:
+      - Thu, 25 Jun 2026 15:10:58 GMT
+      Server:
+      - elb
+      Strict-Transport-Security:
+      - max-age=31536000; includeSubDomains; preload
+      Transfer-Encoding:
+      - chunked
+      Via:
+      - 1.1 b20771afac2acd15ec58304838134668.cloudfront.net (CloudFront)
+      X-Amz-Cf-Id:
+      - iWygVhHRBOLir1dO5kkVY4GylJ2Nh5YGxO_8Tp1-JaTEOXwqbdbg6w==
+      X-Amz-Cf-Pop:
+      - NRT20-P1
+      X-Cache:
+      - Miss from cloudfront
+      X-Content-Type-Options:
+      - nosniff
+      access-control-allow-credentials:
+      - 'true'
+      cache-control:
+      - no-cache
+      vary:
+      - origin, access-control-request-method, access-control-request-headers
+      x-ds-trace-id:
+      - 0e2d2d6b814bc0c4ca187bf2ecd59ad1
+    status:
+      code: 200
+      message: OK
+version: 1
