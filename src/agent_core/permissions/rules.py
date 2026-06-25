@@ -14,6 +14,11 @@ from pydantic import BaseModel, Field
 
 PermissionAction = Literal["allow", "deny", "ask"]
 
+# Where a rule originated. ``session`` rules are remembered in-memory for the
+# duration of an interactive session (see ``SessionPermissionStore``); they are
+# ordinary rules distinguished only by source — never persisted to disk.
+PermissionSource = Literal["builtin", "config", "session"]
+
 
 class PermissionRule(BaseModel):
     """A single permission rule matching tool names by pattern.
@@ -22,6 +27,13 @@ class PermissionRule(BaseModel):
       - Exact:   ``"Bash"`` matches only ``"Bash"``
       - Prefix:  ``"File*"`` is treated as ``file*`` fnmatch
       - Wildcard: ``"mcp__*"`` uses fnmatch glob semantics
+
+    **Priority convention** — lower number = higher precedence:
+      - session-deny    → 10
+      - session-allow   → 20
+      - builtin/config  → 100
+    If a hard-deny builtin rule is ever added, give it ``priority < 10`` so a
+    user's session-allow can never shadow it.
     """
 
     tool_pattern: str = Field(
@@ -41,6 +53,17 @@ class PermissionRule(BaseModel):
     path_constraint: str | None = Field(
         default=None,
         description="Optional path glob constraint (applies only to file/path tools).",
+    )
+    rule_content: str | None = Field(
+        default=None,
+        description=(
+            "Optional content-level constraint (e.g. a Bash command prefix). "
+            "Reserved for content-granular rules — not yet consulted by the matcher."
+        ),
+    )
+    source: PermissionSource = Field(
+        default="builtin",
+        description="Rule origin. 'session' rules are remembered per-session, never persisted.",
     )
     description: str = Field(
         default="",

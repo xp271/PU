@@ -1,24 +1,29 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator
 from contextlib import aclosing
-from typing import Any
 
 from .models import AgentConfig, AgentMessage, AgentResult, StopReason
+# Single source of truth for the callback type — re-exported here for callers
+# that import it from ``agent``.
+from .permissions.engine import PermissionCallback
 from .query import query
+from .session import SessionState
 
-
-# Returns True to allow, False to deny. Widen to a PermissionDecision
-# structure later if richer outcomes (scoped/remembered approvals) are needed.
-PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
+__all__ = ["Agent", "PermissionCallback"]
 
 
 class Agent:
-    def __init__(self, config: AgentConfig) -> None:
+    def __init__(
+        self, config: AgentConfig, session: SessionState | None = None
+    ) -> None:
         self._config = config
         self._permission_callback: PermissionCallback | None = None
         self._trace_id = uuid.uuid4().hex
+        # When provided, conversation history and session-permission memory
+        # persist across prompts; when None, each run is independent.
+        self._session = session
 
     def on_permission_check(self, callback: PermissionCallback) -> None:
         self._permission_callback = callback
@@ -58,6 +63,7 @@ class Agent:
         # *this* task even if the consumer abandons us mid-stream — so MCP
         # teardown (query's finally) never runs at event-loop shutdown in a
         # different task (anyio cancel-scope requirement).
+        session = self._session
         async with aclosing(
             query(
                 prompt=prompt,
@@ -65,7 +71,15 @@ class Agent:
                 trace_id=self._trace_id,
                 permission_callback=self._permission_callback,
                 workspace_root=self._config.workspace_root,
+                initial_messages=(
+                    session.snapshot_for_next_turn() if session is not None else None
+                ),
+                session_store=session.permission_store if session is not None else None,
             )
         ) as stream:
             async for message in stream:
+                # Thread this turn's full history back into the session so the
+                # next prompt continues the conversation.
+                if session is not None and message.type == "done":
+                    session.record_turn_result(message.final_messages)
                 yield message

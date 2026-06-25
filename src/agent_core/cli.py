@@ -38,6 +38,8 @@ from typing import Any
 from .agent import Agent
 from .mcp.client import McpSessionManager
 from .models import AgentConfig, ModelId, ModelProvider
+from .permissions import PermissionOutcome
+from .session import SessionState
 
 # ---------------------------------------------------------------------------
 # Config file resolution
@@ -166,7 +168,7 @@ def _load_config() -> AgentConfig:
 
     model: str = raw.get("model", "anthropic/claude-sonnet-4-5")
     max_turns: int = raw.get("max_turns", 20)
-    permission_mode: str = raw.get("permission_mode", "bypassPermissions")
+    permission_mode: str = raw.get("permission_mode", "ask")
 
     # -- MCP servers: code injection in config > .mcp.json files --
     mcp_servers: dict[str, Any] = {}
@@ -210,6 +212,7 @@ _HELP_TEXT = """\
 Commands:
   /model <provider/name>   Switch model (e.g. /model openai/gpt-4o)
   /key <provider> <key>    Set API key for a provider
+  /clear                   Clear conversation history (keeps session permissions)
   /help                    Show this help
   /quit                    Exit"""
 
@@ -248,11 +251,38 @@ def _handle_command(config: AgentConfig, text: str) -> bool:
     return False
 
 
+async def _permission_callback(
+    tool_name: str, tool_input: dict[str, Any]
+) -> PermissionOutcome:
+    """Ask the user via stdin whether to allow a tool call.
+
+    ``y`` allow once · ``s`` allow for the session · ``n`` deny once ·
+    ``r`` deny for the session.  Anything else (or empty) denies once.
+    """
+    summary = _summarise(tool_input)
+    prompt_text = (
+        f"\n[permission] Allow {tool_name}? {summary}\n"
+        "  [y]=allow once  [s]=allow session  [n]=deny once  [r]=deny session: "
+    )
+    answer = (await asyncio.to_thread(input, prompt_text)).strip().lower()
+    if answer.startswith("s"):
+        return PermissionOutcome.ALLOW_SESSION
+    if answer.startswith("r"):
+        return PermissionOutcome.DENY_SESSION
+    if answer.startswith("y"):
+        return PermissionOutcome.ALLOW_ONCE
+    return PermissionOutcome.DENY_ONCE
+
+
 async def _repl(config: AgentConfig) -> None:
     """Read-eval-print loop."""
     print()
     print(_HELP_TEXT)
     print()
+
+    # One session for the whole REPL: carries conversation history and
+    # session-remembered permission decisions across prompts.
+    session = SessionState()
 
     while True:
         try:
@@ -271,12 +301,17 @@ async def _repl(config: AgentConfig) -> None:
             continue
 
         if prompt.startswith("/"):
+            if prompt.strip() == "/clear":
+                session.clear_history()
+                print("[history cleared]")
+                continue
             if _handle_command(config, prompt):
                 break
             continue
 
         # -- Run agent with current prompt --
-        agent = Agent(config)
+        agent = Agent(config, session=session)
+        agent.on_permission_check(_permission_callback)
         stream = agent.stream(prompt)
         try:
             async for msg in stream:

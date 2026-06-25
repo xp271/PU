@@ -442,6 +442,15 @@ class DoneMessage(BaseModel):
     stop_reason: StopReason
     total_tokens: int = 0
     error_detail: str | None = None
+    final_messages: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Full conversation message list at the end of this turn loop "
+            "(prior history + everything produced this prompt). Lets a "
+            "session runtime thread history into the next prompt."
+        ),
+        exclude=True,
+    )
 
 
 class CompactMessage(BaseModel):
