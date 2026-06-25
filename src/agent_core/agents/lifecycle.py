@@ -84,6 +84,8 @@ async def run_async_lifecycle(
                 else {}
             ),
             parent_context=context,
+            session_id=context.session_id,
+            project_hash=context.project_hash,
         ):
             _update_state(state, msg)
             if msg.type == "done" and msg.stop_reason == "error":

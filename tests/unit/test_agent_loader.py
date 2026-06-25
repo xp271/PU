@@ -122,6 +122,23 @@ Body
         d = load_markdown_definition(path)
         assert d is None
 
+    def test_frontmatter_invalid_field_value_returns_none(self, tmpdir):
+        """agent_type present but with an invalid (non-str) value → the
+        AgentDefinition validation fails and the loader returns None."""
+        path = os.path.join(tmpdir, "bad_value.agent.md")
+        with open(path, "w") as f:
+            f.write("""---
+agent_type:
+  - not
+  - a
+  - string
+---
+Body
+""")
+
+        d = load_markdown_definition(path)
+        assert d is None
+
 
 # ---------------------------------------------------------------------------
 # Directory discovery

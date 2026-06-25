@@ -96,6 +96,39 @@ class TestQuerySingleTurn:
         assert done.stop_reason == "error"  # type: ignore[attr-defined]
 
 
+class TestQueryStreamException:
+    def test_stream_raise_yields_error_and_done(self) -> None:
+        """A Python exception raised *during* streaming (not an ErrorMessage
+        event) must be caught → ErrorMessage + DoneMessage(error), not a crash
+        (plan §2.3.4, loop.py turn-level except)."""
+        from agent_core.llm.events import StreamStart
+
+        class RaisingClient(MockClient):
+            async def stream_messages(
+                self, messages=None, tools=None, system=None,
+                max_tokens=4096, turn_index=0,
+            ):
+                yield StreamStart(turn_index=turn_index, provider="mock", model=self.model)
+                raise RuntimeError("stream blew up")
+
+        client = RaisingClient([])
+        config = AgentConfig(max_turns=5)
+
+        with patch(
+            "agent_core.query.loop.get_client",
+            _mock_get_client_factory(client),
+        ):
+            msgs = _collect(query("test", config, trace_id="t-exc"))
+
+        types = [m.type for m in msgs]
+        assert "error" in types
+        done = msgs[-1]
+        assert done.type == "done"  # type: ignore[attr-defined]
+        assert done.stop_reason == "error"  # type: ignore[attr-defined]
+        err = next(m for m in msgs if m.type == "error")
+        assert "stream blew up" in err.message  # type: ignore[attr-defined]
+
+
 class TestQueryMultiTurn:
     def test_two_turns_tool_then_text(self) -> None:
         """Turn 1: tool_use → execute → result. Turn 2: text → done."""

@@ -120,7 +120,8 @@ def sidechain_tmp(tmp_path, monkeypatch):
     d = tmp_path / "sidechain"
     d.mkdir()
     monkeypatch.setattr(
-        "agent_core.agents.run._sidechain_dir", lambda _trace: str(d)
+        "agent_core.agents.run._sidechain_dir",
+        lambda _trace, session_id=None, project_hash=None: str(d),
     )
     return d
 

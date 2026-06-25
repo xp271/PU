@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from tenacity import retry_if_exception, stop_after_attempt, wait_exponential
+
 
 # ---------------------------------------------------------------------------
 # Error category
@@ -44,11 +46,17 @@ def retry_config_for(classify_error_fn, provider: str) -> dict:
 
     *classify_error_fn* is the provider's ``BaseClient.classify_error`` class
     method.  The returned dict uses exponential back-off 4→60 s, max 3
-    attempts.
+    attempts and reraises the final exception.
+
+    NOTE: the concrete provider clients currently implement retry inline in
+    their ``stream_messages`` loops (so they can yield ``ErrorMessage`` /
+    ``StopEvent`` instead of raising).  This factory is kept as a public,
+    *functional* utility — previously its ``wait``/``stop`` were placeholder
+    strings that would have raised if actually passed to ``tenacity.retry``.
     """
     return {
-        "retry": _retry_predicate(classify_error_fn, provider),
-        "wait": "wait_exponential(multiplier=1, min=4, max=60)",
-        "stop": "stop_after_attempt(3)",
+        "retry": retry_if_exception(_retry_predicate(classify_error_fn, provider)),
+        "wait": wait_exponential(multiplier=1, min=4, max=60),
+        "stop": stop_after_attempt(3),
         "reraise": True,
     }

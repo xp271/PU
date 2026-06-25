@@ -32,6 +32,23 @@ class TestAgent:
         assert isinstance(result.total_tokens, int)
 
     @pytest.mark.asyncio
+    async def test_run_aggregates_error_turn(self) -> None:
+        """run() surfaces an error turn as stop_reason='error' + error_detail
+        (precise assertion, no reliance on a real API key)."""
+        from unittest.mock import patch
+
+        from tests.integration.mock_model import MockClient, make_error_turn
+
+        client = MockClient(make_error_turn("overloaded"))
+        config = AgentConfig(max_turns=2)
+        with patch("agent_core.query.loop.get_client", lambda *_: client):
+            result = await Agent(config).run("trigger an error")
+
+        assert result.stop_reason == "error"
+        assert result.error_detail is not None
+        assert "overloaded" in result.error_detail
+
+    @pytest.mark.asyncio
     async def test_stream_yields_messages(self) -> None:
         """stream() delegates to query() and yields AgentMessage items."""
         config = AgentConfig(max_turns=1)

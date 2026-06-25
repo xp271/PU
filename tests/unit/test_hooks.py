@@ -354,8 +354,80 @@ class TestSubagentStartPipeline:
 
 
 # ============================================================================
+# Pipeline exception fallbacks (plan §1.3)
+# ============================================================================
+
+
+class TestPipelineExceptionFallbacks:
+    """A misbehaving hook must never crash the turn loop; each pipeline has a
+    defined fallback when a hook raises (plan §1.3)."""
+
+    @pytest.mark.asyncio
+    async def test_pre_hook_exception_blocks(self, registry, ctx):
+        registry.register(_raising_hook("pre_tool_use"))
+        mod, reason = await run_pre_tool_use_hooks("Bash", {"cmd": "x"}, ctx, registry)
+        assert mod is None
+        assert reason is not None
+        assert "raised" in reason and "boom" in reason
+
+    @pytest.mark.asyncio
+    async def test_pre_hook_exception_short_circuits_rest(self, registry, ctx):
+        registry.register(_raising_hook("pre_tool_use"), priority=10)
+        later = _tracking_hook("pre_tool_use", HookContinue())
+        registry.register(later, priority=20)
+        _, reason = await run_pre_tool_use_hooks("Read", {}, ctx, registry)
+        assert reason is not None
+        assert not later.called  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_post_hook_exception_marks_error(self, registry, ctx):
+        registry.register(_raising_hook("post_tool_use"))
+        original = ToolCallResult(content="ok")
+        result = await run_post_tool_use_hooks("Read", {}, original, ctx, registry)
+        assert result.is_error is True
+        assert "raised" in result.content and "boom" in result.content
+
+    @pytest.mark.asyncio
+    async def test_stop_hook_exception_is_no_opinion(self, registry, ctx):
+        """A raising stop hook is skipped (treated as no opinion), not fatal."""
+        registry.register(_raising_hook("stop"))
+        result = await run_stop_hooks([], ctx, registry)
+        assert result.should_stop is False
+
+    @pytest.mark.asyncio
+    async def test_stop_hook_exception_does_not_block_later_stop(self, registry, ctx):
+        registry.register(_raising_hook("stop"), priority=10)
+        registry.register(_tracking_stop_hook(True, "real-stop"), priority=20)
+        result = await run_stop_hooks([], ctx, registry)
+        assert result.should_stop is True
+        assert result.reason == "real-stop"
+
+    @pytest.mark.asyncio
+    async def test_subagent_start_hook_exception_blocks(self, registry, ctx):
+        registry.register(_raising_hook("subagent_start"))
+        blocked, reason = await run_subagent_start_hooks(
+            "Explore", "search", None, ctx, registry
+        )
+        assert blocked is True
+        assert reason is not None
+        assert "raised" in reason and "boom" in reason
+
+
+# ============================================================================
 # Helpers
 # ============================================================================
+
+
+def _raising_hook(kind: HookKind):
+    """Hook whose ``__call__`` always raises — exercises pipeline fallbacks."""
+
+    class _Raising:
+        hook_kind: ClassVar[HookKind] = kind
+
+        async def __call__(self, *args: Any, **kwargs: Any):
+            raise RuntimeError("boom")
+
+    return _Raising()
 
 
 def _make_hook(kind: HookKind):

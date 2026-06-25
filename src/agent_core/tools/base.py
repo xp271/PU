@@ -23,6 +23,8 @@ class ToolUseContext:
     parent_allowed_tools: frozenset[str] = field(default_factory=frozenset)
     parent_disallowed_tools: frozenset[str] = field(default_factory=frozenset)
     agent_depth: int = 0                    # §2.6 recursion guard
+    session_id: str | None = None           # Phase B: parent session id for sidechain
+    project_hash: str | None = None         # Phase B: project hash for sidechain path
     notification_queue: list[str] | None = None  # §5.5 async notification delivery
     hook_registry: Any = None  # HookRegistry | None (§Item 9)
 

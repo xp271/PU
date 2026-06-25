@@ -165,7 +165,11 @@ def _safe_content(msg: dict[str, Any]) -> list[dict[str, Any]]:
 async def _load_sidechain_messages(
     sidechain_path: str,
 ) -> list[dict[str, Any]]:
-    """Load and reconstruct a messages list from a sidechain JSONL file."""
+    """Load and reconstruct a messages list from a sidechain JSONL file.
+
+    Handles both v1 ``TranscriptEntry`` envelopes (unwrap ``.message``)
+    and legacy bare ``{role, content, ...}`` dicts (problem #2).
+    """
     messages: list[dict[str, Any]] = []
     try:
         async with aiofiles.open(sidechain_path, "r", encoding="utf-8") as fh:
@@ -175,7 +179,18 @@ async def _load_sidechain_messages(
                     continue
                 try:
                     record = json.loads(stripped)
-                    messages.append(record)
+                    # Phase B: unwrap TranscriptEntry envelope (problem #2)
+                    if "message" in record and "uuid" in record:
+                        msg = record.get("message")
+                        if isinstance(msg, dict) and "role" in msg:
+                            messages.append(msg)
+                            continue
+                        # Fall through: envelope with no valid message → skip
+                        logger.debug("Skipping TranscriptEntry with no valid message")
+                        continue
+                    # Legacy bare format or already-unwrapped message
+                    if "role" in record:
+                        messages.append(record)
                 except json.JSONDecodeError:
                     logger.debug("Skipping unparseable sidechain line")
                     continue

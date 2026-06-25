@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from agent_core.permissions import SessionPermissionStore
 from agent_core.session import SessionState
+from agent_core.persistence.storage import load_entries
 
 
 def test_defaults():
@@ -52,3 +55,199 @@ def test_clear_history_keeps_permission_memory():
     s.clear_history()
     assert s.messages == []
     assert s.permission_store.rules()  # permissions survive /clear
+
+
+# ---------------------------------------------------------------------------
+# Phase B: persistence lifecycle (Item 10)
+# ---------------------------------------------------------------------------
+
+def _msg(role, text):
+    return {"role": role, "content": [{"type": "text", "text": text}]}
+
+
+class TestBeginEndPersistence:
+    @pytest.mark.asyncio
+    async def test_fresh_session_writes_nothing_until_flush(self, tmp_path):
+        p = str(tmp_path / "s.jsonl")
+        s = SessionState()
+        await s.begin_persistence(p)
+        assert s.transcript_path == p
+        assert s._writer is not None and s._writer.is_open
+        await s.end_persistence()
+
+        # Empty session → empty (or absent) file, zero entries
+        entries = await load_entries(p)
+        assert entries == []
+
+    @pytest.mark.asyncio
+    async def test_begin_persistence_writes_preexisting_messages(self, tmp_path):
+        p = str(tmp_path / "s.jsonl")
+        s = SessionState(messages=[_msg("user", "hi"), _msg("assistant", "ok")])
+        await s.begin_persistence(p)
+        await s.end_persistence()
+
+        entries = await load_entries(p)
+        assert len(entries) == 2
+        assert s._written_count == 2
+
+    @pytest.mark.asyncio
+    async def test_end_persistence_idempotent(self, tmp_path):
+        p = str(tmp_path / "s.jsonl")
+        s = SessionState()
+        await s.begin_persistence(p)
+        await s.end_persistence()
+        await s.end_persistence()  # must not raise
+        assert s._writer is None
+
+    @pytest.mark.asyncio
+    async def test_resume_does_not_reappend_history(self, tmp_path):
+        """Problem #1: a resumed session (pre-set _written_count) must not
+        duplicate already-persisted messages when persistence re-opens."""
+        p = str(tmp_path / "s.jsonl")
+        s = SessionState(messages=[_msg("user", "a"), _msg("assistant", "b")])
+        await s.begin_persistence(p)
+        await s.end_persistence()
+        assert len(await load_entries(p)) == 2
+
+        # Simulate resume: same messages already on disk, watermark pre-set.
+        s2 = SessionState(
+            session_id=s.session_id,
+            messages=[_msg("user", "a"), _msg("assistant", "b")],
+        )
+        s2._written_count = 2
+        await s2.begin_persistence(p)
+        await s2.end_persistence()
+
+        # No duplication — still 2 entries.
+        assert len(await load_entries(p)) == 2
+
+
+class TestFlushNewMessages:
+    @pytest.mark.asyncio
+    async def test_incremental_append(self, tmp_path):
+        p = str(tmp_path / "s.jsonl")
+        s = SessionState()
+        await s.begin_persistence(p)
+
+        await s.flush_new_messages([_msg("user", "q1")])
+        await s.flush_new_messages([_msg("user", "q1"), _msg("assistant", "a1")])
+        await s.end_persistence()
+
+        entries = await load_entries(p)
+        assert [e.message["content"][0]["text"] for e in entries] == ["q1", "a1"]
+        assert all(e.type == "message" for e in entries)
+
+    @pytest.mark.asyncio
+    async def test_none_is_noop(self, tmp_path):
+        """B1 fallback: None final_messages must not crash."""
+        p = str(tmp_path / "s.jsonl")
+        s = SessionState()
+        await s.begin_persistence(p)
+        await s.flush_new_messages(None)  # must not raise
+        await s.end_persistence()
+        assert await load_entries(p) == []
+
+    @pytest.mark.asyncio
+    async def test_noop_when_writer_absent(self):
+        s = SessionState()
+        # No begin_persistence → writer is None
+        await s.flush_new_messages([_msg("user", "x")])  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_parent_uuid_chain_continuous(self, tmp_path):
+        p = str(tmp_path / "s.jsonl")
+        s = SessionState()
+        await s.begin_persistence(p)
+        await s.flush_new_messages([_msg("user", "q1")])
+        await s.flush_new_messages([_msg("user", "q1"), _msg("assistant", "a1")])
+        await s.end_persistence()
+
+        entries = await load_entries(p)
+        assert entries[0].parentUuid is None
+        assert entries[1].parentUuid == entries[0].uuid
+
+    @pytest.mark.asyncio
+    async def test_resume_keeps_chain_continuous(self, tmp_path):
+        """B2: after reopen, the next entry's parentUuid links to the last
+        on-disk entry rather than starting a new root."""
+        p = str(tmp_path / "s.jsonl")
+        s = SessionState()
+        await s.begin_persistence(p)
+        await s.flush_new_messages([_msg("user", "q1")])
+        await s.end_persistence()
+
+        first = (await load_entries(p))[0]
+
+        s2 = SessionState(session_id=s.session_id, messages=[_msg("user", "q1")])
+        s2._written_count = 1
+        await s2.begin_persistence(p)
+        await s2.flush_new_messages([_msg("user", "q1"), _msg("assistant", "a1")])
+        await s2.end_persistence()
+
+        entries = await load_entries(p)
+        assert len(entries) == 2
+        assert entries[1].parentUuid == first.uuid  # chain survives resume
+
+
+class TestCompactionDetection:
+    @pytest.mark.asyncio
+    async def test_compaction_writes_checkpoint_and_preserves_originals(self, tmp_path):
+        """Problem #3: compaction appends a checkpoint; originals stay on disk."""
+        p = str(tmp_path / "s.jsonl")
+        s = SessionState()
+        await s.begin_persistence(p)
+
+        # Grow to 4 messages
+        live = [_msg("user", "m1"), _msg("assistant", "m2"),
+                _msg("user", "m3"), _msg("assistant", "m4")]
+        await s.flush_new_messages(live)
+
+        # Compaction: head replaced by a summary, keep last message verbatim
+        compacted = [_msg("system", "SUMMARY"), _msg("assistant", "m4")]
+        await s.flush_new_messages(compacted)
+        await s.end_persistence()
+
+        entries = await load_entries(p)
+        # 4 original message entries + 1 checkpoint
+        assert len(entries) == 5
+        assert [e.type for e in entries] == [
+            "message", "message", "message", "message", "compaction",
+        ]
+        # Originals preserved (FULL audit)
+        assert entries[0].message["content"][0]["text"] == "m1"
+        # Checkpoint snapshot == compacted live list
+        cp = entries[4].compaction
+        assert cp is not None
+        assert cp.segment_index == 1
+        assert cp.kept_count == 1            # m4 retained
+        assert cp.summary_count == 1         # SUMMARY
+        assert len(cp.snapshot) == 2
+        # Watermark aligns with new live length
+        assert s._written_count == 2
+
+    @pytest.mark.asyncio
+    async def test_segment_index_increments_with_resume(self, tmp_path):
+        """B3: segment_index keeps increasing across resume."""
+        p = str(tmp_path / "s.jsonl")
+        s = SessionState()
+        s._compaction_count = 2  # as if two checkpoints already happened
+        await s.begin_persistence(p)
+        await s.flush_new_messages([_msg("user", "m1"), _msg("assistant", "m2")])
+        await s.flush_new_messages([_msg("system", "SUM")])
+        await s.end_persistence()
+
+        entries = await load_entries(p)
+        cp = next(e for e in entries if e.type == "compaction")
+        assert cp.compaction.segment_index == 3  # 2 + 1
+
+    @pytest.mark.asyncio
+    async def test_no_false_compaction_on_pure_growth(self, tmp_path):
+        p = str(tmp_path / "s.jsonl")
+        s = SessionState()
+        await s.begin_persistence(p)
+        await s.flush_new_messages([_msg("user", "m1")])
+        await s.flush_new_messages([_msg("user", "m1"), _msg("assistant", "m2")])
+        await s.end_persistence()
+
+        entries = await load_entries(p)
+        assert all(e.type == "message" for e in entries)  # no checkpoint

@@ -229,6 +229,8 @@ class AgentTool(Tool):
             parent_disallowed_tools=context.parent_disallowed_tools,
             parent_mcp_servers=context.parent_config.mcp_servers,  # type: ignore[union-attr]
             parent_context=context,
+            session_id=context.session_id,
+            project_hash=context.project_hash,
         ):
             if msg.type == "assistant_text":
                 parts.append(msg.content)

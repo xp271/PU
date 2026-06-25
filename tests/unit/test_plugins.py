@@ -153,6 +153,74 @@ class TestRegistryEnableDisable:
             registry.unregister("test-plugin")
 
 
+# ============================================================================
+# Lifecycle error isolation (safe_enable_plugins / safe_disable_all, §3.3)
+# ============================================================================
+
+
+class _BadEnablePlugin(Plugin):
+    name: ClassVar[str] = "bad-enable"
+
+    async def on_enable(self) -> None:
+        raise RuntimeError("enable boom")
+
+
+class _BadDisablePlugin(Plugin):
+    name: ClassVar[str] = "bad-disable"
+
+    async def on_disable(self) -> None:
+        raise RuntimeError("disable boom")
+
+
+class TestLifecycleIsolation:
+    @pytest.mark.asyncio
+    async def test_safe_enable_skips_failing_plugin(self):
+        """One plugin raising in on_enable must not stop the others."""
+        from agent_core.plugins.lifecycle import safe_enable_plugins
+        from agent_core.tools.registry import ToolRegistry
+
+        registry = PluginRegistry()
+        registry.register(_BadEnablePlugin)
+        registry.register(_TestPlugin)
+
+        tool_reg = ToolRegistry()
+        # Must not raise even though bad-enable.on_enable() throws.
+        await safe_enable_plugins(
+            registry, ["bad-enable", "test-plugin"], tool_registry=tool_reg
+        )
+
+        # The good plugin still got enabled and injected its tool.
+        assert registry.is_enabled("test-plugin")
+        assert "TestTool" in tool_reg.names()
+
+    @pytest.mark.asyncio
+    async def test_safe_disable_all_isolates_failures(self):
+        """One plugin raising in on_disable must not stop draining the rest."""
+        from agent_core.plugins.lifecycle import safe_disable_all
+
+        registry = PluginRegistry()
+        registry.register(_BadDisablePlugin)
+        registry.register(_TestPlugin)
+        await registry.enable("bad-disable")
+        await registry.enable("test-plugin")
+        assert set(registry.enabled_plugins()) == {"bad-disable", "test-plugin"}
+
+        # Must not raise even though bad-disable.on_disable() throws.
+        await safe_disable_all(registry)
+
+        # Every plugin was popped from the enabled set despite the error.
+        assert registry.enabled_plugins() == []
+
+    @pytest.mark.asyncio
+    async def test_safe_enable_unknown_name_skipped(self):
+        from agent_core.plugins.lifecycle import safe_enable_plugins
+
+        registry = PluginRegistry()
+        # Unknown plugin → enable() raises KeyError → swallowed, no crash.
+        await safe_enable_plugins(registry, ["does-not-exist"])
+        assert registry.enabled_plugins() == []
+
+
 class TestRegistryQueries:
     def test_is_enabled(self):
         registry = PluginRegistry()

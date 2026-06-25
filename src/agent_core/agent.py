@@ -9,6 +9,7 @@ from .permissions.engine import PermissionCallback
 from .query import query
 from .session import SessionState
 from .hooks.registry import _default_hook_registry
+from .persistence.path import compute_project_hash
 
 __all__ = ["Agent", "PermissionCallback"]
 
@@ -80,11 +81,18 @@ class Agent:
                 ),
                 session_store=session.permission_store if session is not None else None,
                 hook_registry=hook_registry,
+                session_id=session.session_id if session is not None else None,
+                project_hash=(
+                    compute_project_hash(self._config.workspace_root)
+                    if session is not None
+                    else None
+                ),
             )
         ) as stream:
             async for message in stream:
                 # Thread this turn's full history back into the session so the
                 # next prompt continues the conversation.
                 if session is not None and message.type == "done":
+                    await session.flush_new_messages(message.final_messages)
                     session.record_turn_result(message.final_messages)
                 yield message

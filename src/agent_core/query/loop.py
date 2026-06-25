@@ -74,6 +74,8 @@ async def query(
     initial_messages: list[dict[str, Any]] | None = None,
     session_store: SessionPermissionStore | None = None,
     hook_registry: Any = None,
+    session_id: str | None = None,
+    project_hash: str | None = None,
 ) -> AsyncGenerator[AgentMessage, None]:
     """Run the full agent turn loop for a single user prompt.
 
@@ -119,6 +121,8 @@ async def query(
             initial_messages=initial_messages,
             session_store=session_store,
             hook_registry=hook_registry,
+            session_id=session_id,
+            project_hash=project_hash,
         ):
             yield message
     finally:
@@ -166,6 +170,8 @@ async def _run_turns(
     initial_messages: list[dict[str, Any]] | None = None,
     session_store: SessionPermissionStore | None = None,
     hook_registry: Any = None,
+    session_id: str | None = None,
+    project_hash: str | None = None,
 ) -> AsyncGenerator[AgentMessage, None]:
     """Run the agent turn loop.
 
@@ -223,6 +229,8 @@ async def _run_turns(
         agent_depth=0,
         notification_queue=notification_queue,
         hook_registry=hook_registry,
+        session_id=session_id,
+        project_hash=project_hash,
     )
 
     # §Item 9: bootstrap skill registry (per-query instance).

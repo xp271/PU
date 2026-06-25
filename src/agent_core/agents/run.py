@@ -75,6 +75,8 @@ async def run_agent(
     parent_disallowed_tools: frozenset[str] | None = None,
     parent_mcp_servers: dict[str, McpServerConfig] | None = None,
     parent_context: ToolUseContext | None = None,
+    session_id: str | None = None,
+    project_hash: str | None = None,
 ) -> AsyncGenerator[AgentMessage, None]:
     """Execute a child agent in an isolated environment.
 
@@ -200,7 +202,9 @@ async def run_agent(
         return decision.allowed
 
     # ---- 6. Sidechain file ------------------------------------------------
-    sidechain_dir = _sidechain_dir(parent_trace_id)
+    sidechain_dir = _sidechain_dir(
+        parent_trace_id, session_id=session_id, project_hash=project_hash
+    )
     await aiofiles.os.makedirs(sidechain_dir, exist_ok=True)
     sidechain_path = os.path.join(sidechain_dir, f"{agent_id}.jsonl")
     sidechain_fh = await aiofiles.open(sidechain_path, "a", encoding="utf-8")
@@ -210,6 +214,7 @@ async def run_agent(
         turn_counter = 0
         turn_texts: list[str] = []
         turn_tool_uses: list[ToolUse] = []
+        last_su: str | None = None  # sidechain parentUuid chain
 
         async for msg in run_query(
             prompt=prompt,
@@ -234,13 +239,19 @@ async def run_agent(
                 case "tool_result":
                     # Flush accumulated turn: write assistant + tool results
                     if turn_texts or turn_tool_uses:
-                        await _write_turn_to_sidechain(
-                            sidechain_fh, turn_counter, turn_texts, turn_tool_uses
+                        new_uuid = await _write_turn_to_sidechain(
+                            sidechain_fh, turn_counter, turn_texts,
+                            turn_tool_uses, session_id, last_su,
                         )
+                        if new_uuid:
+                            last_su = new_uuid
                     # Write tool_result as user message
-                    await _write_tool_result_to_sidechain(
-                        sidechain_fh, turn_counter, msg  # type: ignore[arg-type]
+                    new_uuid = await _write_tool_result_to_sidechain(
+                        sidechain_fh, turn_counter, msg,  # type: ignore[arg-type]
+                        session_id, last_su,
                     )
+                    if new_uuid:
+                        last_su = new_uuid
                     turn_counter += 1
                     turn_texts = []
                     turn_tool_uses = []
@@ -249,9 +260,12 @@ async def run_agent(
                 case "done":
                     # Final flush if turn not yet written
                     if turn_texts or turn_tool_uses:
-                        await _write_turn_to_sidechain(
-                            sidechain_fh, turn_counter, turn_texts, turn_tool_uses
+                        new_uuid = await _write_turn_to_sidechain(
+                            sidechain_fh, turn_counter, turn_texts,
+                            turn_tool_uses, session_id, last_su,
                         )
+                        if new_uuid:
+                            last_su = new_uuid
                     yield msg
 
                 case _:
@@ -274,12 +288,24 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 
 
-def _sidechain_dir(parent_trace_id: str) -> str:
-    """Compute the sidechain directory for a parent session."""
+def _sidechain_dir(
+    parent_trace_id: str,
+    session_id: str | None = None,
+    project_hash: str | None = None,
+) -> str:
+    """Compute the sidechain directory for a parent session.
+
+    When *session_id* and *project_hash* are both set, uses the new
+    Phase B path scheme: ``~/.agent/projects/{hash}/{session_id}/``.
+    Otherwise falls back to the legacy path:
+    ``~/.agent/sessions/{parent_trace_id}/``.
+    """
     home = os.path.expanduser("~")
-    return os.path.join(
-        home, ".agent", "sessions", parent_trace_id
-    )
+    if session_id is not None and project_hash is not None:
+        return os.path.join(
+            home, ".agent", "projects", project_hash, session_id
+        )
+    return os.path.join(home, ".agent", "sessions", parent_trace_id)
 
 
 def _populate_child_registry(
@@ -318,8 +344,17 @@ async def _write_turn_to_sidechain(
     turn: int,
     texts: list[str],
     tool_uses: list[ToolUse],
-) -> None:
-    """Write an assistant message to the sidechain JSONL."""
+    session_id: str | None = None,
+    last_uuid: str | None = None,
+) -> str | None:
+    """Write an assistant message to the sidechain JSONL.
+
+    Uses the ``TranscriptEntry`` envelope (Phase B) when *session_id*
+    is provided; otherwise writes the legacy bare format for backward
+    compatibility.
+
+    Returns the new entry's UUID (or ``None`` in legacy mode).
+    """
     content: list[dict[str, Any]] = []
     for t in texts:
         stripped = t.strip()
@@ -333,8 +368,22 @@ async def _write_turn_to_sidechain(
             "input": tu.tool_input,
         })
     if not content:
-        return
+        return None
 
+    if session_id is not None:
+        from ..persistence.storage import TranscriptEntry
+
+        entry = TranscriptEntry.from_message(
+            message={"role": "assistant", "content": content},
+            session_id=session_id,
+            parent_uuid=last_uuid,
+            is_sidechain=True,
+        )
+        await fh.write(entry.model_dump_json() + "\n")
+        await fh.flush()
+        return entry.uuid
+
+    # Legacy format
     record = {
         "role": "assistant",
         "content": content,
@@ -343,14 +392,45 @@ async def _write_turn_to_sidechain(
     }
     await fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     await fh.flush()
+    return None
 
 
 async def _write_tool_result_to_sidechain(
     fh,
     turn: int,
     tr: ToolResult,
-) -> None:
-    """Write a tool_result user message to the sidechain JSONL."""
+    session_id: str | None = None,
+    last_uuid: str | None = None,
+) -> str | None:
+    """Write a tool_result user message to the sidechain JSONL.
+
+    Uses the ``TranscriptEntry`` envelope (Phase B) when *session_id*
+    is provided.
+    """
+    if session_id is not None:
+        from ..persistence.storage import TranscriptEntry
+
+        entry = TranscriptEntry.from_message(
+            message={
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tr.tool_use_id,
+                        "content": tr.content,
+                        "is_error": tr.is_error,
+                    }
+                ],
+            },
+            session_id=session_id,
+            parent_uuid=last_uuid,
+            is_sidechain=True,
+        )
+        await fh.write(entry.model_dump_json() + "\n")
+        await fh.flush()
+        return entry.uuid
+
+    # Legacy format
     record = {
         "role": "user",
         "content": [
@@ -366,3 +446,4 @@ async def _write_tool_result_to_sidechain(
     }
     await fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     await fh.flush()
+    return None
