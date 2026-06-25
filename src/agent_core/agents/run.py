@@ -28,6 +28,7 @@ from typing import Any
 import aiofiles
 import aiofiles.os
 
+from ..hooks.registry import HookRegistry
 from ..models import (
     AgentConfig,
     AgentMessage,
@@ -135,6 +136,21 @@ async def run_agent(
     )
 
     # ---- 2. Isolated ToolUseContext ----------------------------------------
+    # §Item 9: child inherits parent hooks; extra hooks from the definition
+    # are appended.
+    parent_hr = (
+        getattr(parent_context, "hook_registry", None)
+        if parent_context
+        else None
+    )
+    if parent_hr is not None:
+        child_hook_registry: HookRegistry = parent_hr.copy_with_overrides(
+            definition.hooks
+        )
+    else:
+        child_hook_registry = HookRegistry()
+        child_hook_registry.register_all(definition.hooks)
+
     notification_queue: list[str] = []
 
     child_context = ToolUseContext(
@@ -156,6 +172,7 @@ async def run_agent(
         parent_disallowed_tools=child_disallowed,
         agent_depth=depth,
         notification_queue=notification_queue,
+        hook_registry=child_hook_registry,
     )
 
     # ---- 3. Child AgentConfig ----------------------------------------------
@@ -203,6 +220,7 @@ async def run_agent(
             registry=child_registry,
             system=child_system,
             initial_messages=parent_messages,
+            hook_registry=child_hook_registry,
         ):
             match msg.type:
                 case "assistant_text":

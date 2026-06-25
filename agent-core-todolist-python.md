@@ -116,6 +116,27 @@ from agent_core import (
     McpServerTransport,
     McpOAuthConfig,
     register_mcp_tools,
+
+    # Hooks 系统
+    HookRegistry,
+    PreToolUseHook,
+    PostToolUseHook,
+    StopHook,
+    SubagentStartHook,
+    HookBlock,
+    HookModify,
+    HookContinue,
+    HookResult,
+    StopResult,
+
+    # Plugin 系统
+    Plugin,
+    PluginRegistry,
+
+    # Skills 系统
+    SkillDefinition,
+    SkillRegistry,
+    SkillTool,
 )
 ```
 
@@ -2585,34 +2606,274 @@ class AgentLifecycleState:
 
 ---
 
-### 9. Hooks + Plugin + Skills 系统 (2 天) — ⬜ 待实现
+### 9. Hooks + Plugin + Skills 系统 (5–7 天) — ✅ 已实现
 
 **功能**: Hook 管线（可阻断/可修改输出），Plugin 热插拔注册表，Skill 定义与执行（inline / fork 两种模式）。
 
 **原因**: 这三个是 Agent 的扩展机制。Hook 让外部代码介入工具执行；Plugin 让能力可热插拔；Skills 让用户无需写代码就能定义可复用工作流。
 
-- [ ] Hook 类型定义（Protocol）：
-  ```python
-  class PreToolUseHook(Protocol):
-      async def __call__(self, tool_name: str, tool_input: dict, context: ToolUseContext) -> HookResult
-  class PostToolUseHook(Protocol):
-      async def __call__(self, tool_name: str, tool_result: ToolResult, context: ToolUseContext) -> HookResult
-  class StopHook(Protocol):
-      async def __call__(self, messages: list, context: ToolUseContext) -> StopResult
-  ```
-  HookResult = `{"continue": True}` | `{"block": True, "reason": str}` | `{"modify_output": new_result}`
-- [ ] Hook 注册表：`dict[HookType, list[Hook]]`，全局 + 项目级隔离
-- [ ] PreToolUse 管线：任一 hook 返回 block → 工具终止执行，返回 error tool_result
-- [ ] PostToolUse 管线：按顺序执行，可修改 tool_result / 注入上下文消息 / 标记 should_stop
-- [ ] Stop hook 周期性评估：每轮 assistant message 后调用，可提前终止循环（Goal 检测的基础）
-- [ ] Plugin 注册表：`importlib.metadata.entry_points(group="agent_core.plugins")` 自动发现 + 手动注册 API
-- [ ] Plugin 生命周期：`plugin.enable()` / `plugin.disable()`，插件可提供 tools / hooks / agent_definitions / skills
-- [ ] Skill 定义格式：`SKILL.md` frontmatter（name, description, tools, model_override, context）
-- [ ] Skill 加载器：递归扫描 `AgentConfig.skills_dir` → 解析 frontmatter → 注册
-- [ ] Skill 执行：
-  - inline 模式：展开 SKILL.md body 为 user message → 注入 tool 白名单覆盖 → 继续当前 Agent 循环
-  - fork 模式：在隔离子 Agent 中执行（用于长时间 skill）→ 结果回传
-- [ ] Skill 权限：复用权限引擎，按 skill name 匹配 deny/ask/allow 规则（含前缀通配 `review:*`）
+**实现文件**:
+
+| 文件 | 职责 |
+|------|------|
+| `src/agent_core/hooks/__init__.py` | 公开导出（4 种 Protocol + 数据模型 + 管线执行器） |
+| `src/agent_core/hooks/types.py` | Protocol 定义（PreToolUseHook / PostToolUseHook / StopHook / SubagentStartHook）+ HookBlock / HookModify / HookContinue / StopResult |
+| `src/agent_core/hooks/registry.py` | HookRegistry — 显式 `hook_kind` 分类 + 优先级桶 + `copy_with_overrides()` 子Agent 继承 + `_default_hook_registry` 只读模板 |
+| `src/agent_core/hooks/pipeline.py` | 管线执行器：`run_pre_tool_use_hooks` / `run_post_tool_use_hooks` / `run_stop_hooks` / `run_subagent_start_hooks` |
+| `src/agent_core/plugins/__init__.py` | 公开导出 |
+| `src/agent_core/plugins/base.py` | Plugin 抽象基类（可提供 tools / hooks / agent_definitions / skills） |
+| `src/agent_core/plugins/registry.py` | PluginRegistry — `entry_points(group="agent_core.plugins")` 发现 + 手动注册 |
+| `src/agent_core/plugins/lifecycle.py` | `safe_enable_plugins()` / `safe_disable_all()` — 错误隔离 |
+| `src/agent_core/skills/__init__.py` | 公开导出 |
+| `src/agent_core/skills/definition.py` | SkillDefinition Pydantic 模型（name / tools / model / execution_mode / parameters / background） |
+| `src/agent_core/skills/registry.py` | SkillRegistry — `register(source=)` / `list_by_source()` / 首遇优先覆盖 |
+| `src/agent_core/skills/loader.py` | `load_skill_from_markdown()` + `discover_skills()` — `<dir>/<name>/SKILL.md` 约定 |
+| `src/agent_core/skills/executor.py` | `render_template()` 容忍空格展开 + `execute_skill_inline()` / `execute_skill_fork()` — 均走 `run_agent()` |
+| `src/agent_core/skills/tool.py` | SkillTool（name="Skill", `is_destructive=True`）— LLM tool_use 触发 skill |
+| `src/agent_core/skills/permissions.py` | SkillPermissionEngine — fnmatch 模式匹配 allow/deny/ask |
+
+**测试文件**:
+
+| 文件 | 说明 |
+|------|------|
+| `tests/unit/test_hooks.py` | 36 个单元测试（类型模型 / 注册表路由+优先级+继承 / pipeline 执行 / 短路语义） |
+| `tests/unit/test_plugins.py` | 18 个单元测试（基类默认值 / 注册+enable+disable+注入 / 错误边界） |
+| `tests/unit/test_skills.py` | 24 个单元测试（定义模型 / registry CRUD / loader 解析+发现 / 模板渲染 / 权限匹配） |
+
+---
+
+#### 9.1 Hooks — Protocol 定义 (`hooks/types.py`)
+
+Hook 分类靠**显式 `hook_kind` ClassVar**（四种 Protocol 仅有 `__call__`，`@runtime_checkable`+`isinstance` 全部互相匹配，不可用于分类）。
+
+```python
+HookKind = Literal["pre_tool_use", "post_tool_use", "stop", "subagent_start"]
+
+class HookBase:
+    hook_kind: ClassVar[HookKind]
+
+# -- 返回类型 --
+class HookBlock(BaseModel):
+    action: Literal["block"] = "block"
+    reason: str = ""
+    message: str | None = None  # 注入对话的提示
+
+class HookModify(BaseModel):
+    action: Literal["modify"] = "modify"
+    new_result: Any  # 替换后的 ToolCallResult.content 或 tool_input dict
+
+class HookContinue(BaseModel):
+    action: Literal["continue"] = "continue"
+
+HookResult = HookContinue | HookBlock | HookModify
+
+class StopResult(BaseModel):
+    should_stop: bool = False
+    reason: str = ""
+    message: str | None = None
+```
+
+**四种 Protocol**:
+
+| Protocol | hook_kind | 挂点 | 返回语义 |
+|----------|-----------|------|---------|
+| `PreToolUseHook` | `"pre_tool_use"` | `run_tool_use()` 步骤 5（权限之后，执行之前） | `HookModify` 改 input 后**重跑 bash_guard + 权限** |
+| `PostToolUseHook` | `"post_tool_use"` | `run_tool_use()` 步骤 7（执行之后，**persist 之前**） | 对完整 `ToolCallResult` 操作 |
+| `StopHook` | `"stop"` | `_run_turns()` **turn 循环顶部**（notification drain 后、budget 前） | `should_stop=True` → `DoneMessage("end_turn")` 提前终止 |
+| `SubagentStartHook` | `"subagent_start"` | `AgentTool.call()` 步骤 4（子 Agent 启动前） | `HookBlock` 拒绝启动 |
+
+---
+
+#### 9.2 HookRegistry (`hooks/registry.py`)
+
+Per-query 实例（挂在 `ToolUseContext.hook_registry`），**非进程级单例**。模块级 `_default_hook_registry` 仅作只读模板。
+
+```python
+class HookRegistry:
+    def register(self, hook, priority: int = 100) -> None: ...
+    def register_all(self, hooks: list, priority: int = 100) -> None: ...
+    def pre_tool_use_hooks(self) -> list: ...      # 按 priority 升序
+    def post_tool_use_hooks(self) -> list: ...
+    def stop_hooks(self) -> list: ...
+    def subagent_start_hooks(self) -> list: ...
+    def is_empty(self) -> bool: ...                # 零开销短路
+    def copy_with_overrides(self, extra_hooks: list) -> "HookRegistry": ...
+```
+
+- 排序三元组 `(priority, monotonic_seq, hook)` — 同 priority 按注册顺序，永不去对比 hook 对象本身
+- `copy_with_overrides()` 深拷贝 + 追加 `extra_hooks`（priority=100），用于子 Agent 隔离
+
+#### 9.3 管线集成
+
+##### `run_tool_use()` — 步骤 3~5 收敛 + post-hooks
+
+```
+步骤 3~5 收敛循环:
+  effective_input = tool_use.tool_input
+  _guard_and_permit(effective_input)          # bash_guard + 权限
+  if hook_registry:
+      modified_input, block_reason = run_pre_tool_use_hooks(...)
+      if block_reason → error ToolResult
+      if modified_input:
+          re-validate + 重跑 _guard_and_permit  # 防提权
+
+步骤 6: execute
+步骤 7: post-hooks (对完整 ToolCallResult, persist 之前)
+步骤 8: persist
+```
+
+##### `_run_turns()` — Stop hook
+
+每个 turn 顶部（notification drain 后、budget/truncation 前）调用 `run_stop_hooks()`。`should_stop=True` 时先 yield `AssistantText(result.message)` 再 yield `DoneMessage("end_turn")`。
+
+##### `agents/run.py` — 子 Agent hook 继承
+
+```python
+parent_hr = getattr(parent_context, "hook_registry", None)
+child_hook_registry = parent_hr.copy_with_overrides(definition.hooks) if parent_hr else HookRegistry()
+child_context.hook_registry = child_hook_registry
+```
+
+##### `agents/tool.py` — SubagentStart hook
+
+`AgentTool.call()` 中，`_run_sync` / `_run_async` 之前调用 `run_subagent_start_hooks()`。block 时返回 `is_error=True` 的 `ToolCallResult`。
+
+##### `agent.py` — 启动注入
+
+`Agent.stream()` 构造 per-query `HookRegistry`：`_default_hook_registry.copy_with_overrides(config.hooks)` → 传入 `query(hook_registry=...)`。`query()` 内部若 `hook_registry=None` 也自动执行此逻辑，覆盖 CLI/测试/子Agent 调用路径。
+
+#### 9.4 Plugin (`plugins/`)
+
+```python
+class Plugin(ABC):
+    name: ClassVar[str]                       # 唯一标识符
+    version: ClassVar[str] = "0.1.0"
+    async def on_enable(self) -> None: ...
+    async def on_disable(self) -> None: ...
+    def get_tools(self) -> list[type[Tool]]: return []
+    def get_hooks(self) -> list: return []
+    def get_agent_definitions(self) -> list[AgentDefinition]: return []
+    def get_skills(self) -> list: return []
+
+class PluginRegistry:
+    GROUP_NAME = "agent_core.plugins"
+    def discover(self) -> list[str]: ...           # entry_points 扫描
+    def register(self, plugin_cls) -> None: ...
+    async def enable(name, *, tool_registry, hook_registry, skill_registry, agent_registry) -> None: ...
+    async def disable(name, ...) -> None: ...
+```
+
+- `enable()` 的四个注册表**显式传入**（per-query hook/skill 实例，不是全局单例）
+- `query()` 启动时：`PluginRegistry.discover()` → `safe_enable_plugins(auto_enable_plugins, ...)` → 贡献注入到本次 per-query 注册表
+
+#### 9.5 Skills (`skills/`)
+
+##### SkillDefinition (`skills/definition.py`)
+
+```python
+class SkillParameter(BaseModel):
+    type: str = "string"
+    description: str = ""
+    required: bool = False
+
+class SkillDefinition(BaseModel):
+    name: str                              # 唯一标识符
+    description: str = ""
+    tools: list[str] = ["*"]
+    model: str | None = None
+    permission_mode: str | None = None
+    system_prompt: str = ""
+    prompt: str = ""                       # SKILL.md body（模板文本）
+    parameters: dict[str, SkillParameter] = {}
+    execution_mode: Literal["inline", "fork"] = "inline"
+    background: bool = False
+```
+
+##### SKILL.md 格式
+
+```
+<dir>/<skill-name>/SKILL.md
+```
+
+YAML frontmatter（name, description, tools, execution_mode, parameters）+ Markdown body（`{{ param }}` 模板）。
+
+##### 执行器 (`skills/executor.py`)
+
+两种模式**均走 `run_agent()`**（不重入当前 turn 循环）：
+
+| 模式 | 消息历史 | 用途 |
+|------|----------|------|
+| `inline` | `parent_messages=context.messages` | 需当前对话上下文的 skill |
+| `fork` | 无 parent_messages（全新历史） | 隔离、自包含的 skill |
+
+```python
+def render_template(template, arguments, declared) -> str: ...
+async def execute_skill_inline(skill, arguments, context) -> ToolCallResult: ...
+async def execute_skill_fork(skill, arguments, context) -> ToolCallResult: ...
+```
+
+##### SkillTool (`skills/tool.py`)
+
+`@register_tool`，name=`"Skill"`，`is_destructive=True`。
+
+```python
+class SkillTool(Tool):
+    name = "Skill"
+    is_destructive = True   # skill 可能跑 Write/Edit/Bash
+
+class SkillInput(BaseModel):
+    skill: str
+    arguments: dict[str, str] = {}
+    mode: Literal["inline", "fork"] | None = None
+```
+
+内部流程：resolve Registry → render_template → execute_skill_inline/fork。
+
+##### Skill 权限 (`skills/permissions.py`)
+
+```python
+class SkillPermissionEngine:
+    def check(self, skill_name: str) -> str: ...  # "allow" | "deny" | "ask"
+
+def default_skill_permissions() -> SkillPermissionEngine: ...
+```
+
+fnmatch 匹配（`review:*` / `dangerous-*` / `*`），低 priority 优先命中。默认规则 `* → ask`。
+
+##### 在 query() 中的注入
+
+`_run_turns()` 启动时 `discover_skills()` 扫描三个来源（config.skills_dir > project .agent/skills > user ~/.agent/skills）→ 首遇优先注册到 per-query `SkillRegistry` → 挂到 `ToolUseContext`。`SkillTool.call()` 通过 `_get_skill_registry(context)` 读取。
+
+#### 9.6 CLI 集成
+
+- `/skills` — 列出所有已发现 skill（名称、模式、描述）
+- `/help` 已更新包含 `/skills`
+
+#### 9.7 AgentConfig 新增字段 (`models.py`)
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `auto_enable_plugins` | `list[str]` | `[]` | Agent 启动时自动激活的插件名列表 |
+
+#### 9.8 ToolUseContext 新增字段 (`tools/base.py`)
+
+```python
+hook_registry: Any = None  # HookRegistry | None (§Item 9)
+```
+
+#### 9.9 公开导出 (`agent_core/__init__.py` 增量)
+
+```python
+from agent_core import (
+    # Hooks
+    HookRegistry, PreToolUseHook, PostToolUseHook, StopHook, SubagentStartHook,
+    HookBlock, HookModify, HookContinue, HookResult, StopResult,
+    # Plugin
+    Plugin, PluginRegistry,
+    # Skills
+    SkillDefinition, SkillRegistry, SkillTool,
+)
+```
 
 ---
 
@@ -2655,7 +2916,7 @@ class AgentLifecycleState:
 
 **原因**: 可被第三方依赖的库需要可信的测试覆盖。vcrpy 覆盖 LLM 调用确定性场景，mock model 覆盖并发/竞态/隔离逻辑，两者互补。
 
-- [x] **单元测试**（pytest） — 现有 ~702 个单元测试（45 个测试文件），覆盖：
+- [x] **单元测试**（pytest） — 现有 ~755 个单元测试（48 个测试文件），覆盖：
   - 每个 Tool 的 validate_input / call / 边界条件
   - AgentConfig / ModelId / AgentMessage 模型校验
   - AgentDefinition / AgentRegistry / 加载器 / 内置 Agent
@@ -2665,6 +2926,9 @@ class AgentLifecycleState:
   - 压缩触发 / 提示词 / 一致性验证
   - Agent 生命周期 / Fork / resolve / AgentTool
   - SessionState
+  - Hooks（36 个：类型模型 / 注册表 / pipeline / 短路语义）
+  - Plugins（18 个：基类 / 注册+enable+disable / 注入 / 错误边界）
+  - Skills（24 个：定义模型 / registry / loader / 模板渲染 / 权限）
 - [x] **mock model 集成测试**（已实现 `MockModel` + `tests/integration/`）：`test_query_loop.py`（单轮/多轮/max_turns/error）、`test_tool_pipeline.py`（并发/串行）、`test_compression.py`（query loop 压缩路径）
 - [ ] **vcrpy 录制回放测试** — 桩已创建（`tests/e2e/test_turn_flow.py` / `test_compression.py`），未录制
 - [ ] **Mock 集成测试补齐**: `test_subagent.py` / `test_fork.py` / `test_permission_inheritance.py` 占位桩
@@ -2683,11 +2947,11 @@ class AgentLifecycleState:
 | Phase 2: 压缩 & MCP | #5.5 压缩 (2) + #6 MCP (2) | 4 | ✅ 已完成 |
 | Phase 3: Agent 定义 | #7 Agent 定义 (2) | 2 | ✅ 已完成 |
 | Phase 3: 执行引擎 | #8 执行引擎+AgentTool+生命周期+Fork (5) | 5 | ✅ 已完成 |
-| Phase 3: 扩展 | #9 Hooks/Plugin/Skills (2) | 2 | ⬜ 待实现 |
+| Phase 3: 扩展 | #9 Hooks/Plugin/Skills (5–7) | 5–7 | ✅ 已完成 |
 | Phase 4: 持久化 | #10 会话运行时层 Phase A (1.5) | 1.5 | ✅ 已完成 |
 | Phase 4: 持久化 | #10 落盘+恢复 Phase B (2) | 2 | ⬜ 待实现 |
 | Phase 4: 收尾 | #11 测试补齐+文档+发布 (2) | 2 | 🔶 部分完成（测试 ~80%，文档/发布 0%） |
-| **总计** | **13 条目** | **34.5 天 (~7 周)** | 已完成 ~70% |
+| **总计** | **13 条目** | **37.5–39.5 天 (~8 周)** | 已完成 ~78% |
 
 ---
 
@@ -2779,11 +3043,11 @@ agent-core/
 │       │   ├── inheritance.py      # 子Agent 权限继承 (min / 并集 / 交集)
 │       │   └── bash_guard.py       # Bash AST 安全检查 (tree-sitter)
 │       │
-│       ├── hooks/                  # ⬜ Hooks 系统 (待实现 — Item 9)
-│       │   ├── __init__.py
-│       │   ├── types.py            # Protocol 定义 (Pre/Post/Stop/SubagentStart)
-│       │   ├── registry.py         # Hook 注册表 (全局 + 项目级)
-│       │   └── pipeline.py         # 管线执行器 (PreToolUse / PostToolUse)
+│       ├── hooks/                  # ✅ Hooks 系统 (Item 9)
+│       │   ├── __init__.py         # 公开导出: 4 Protocol + 数据模型 + pipeline
+│       │   ├── types.py            # Protocol (Pre/Post/Stop/SubagentStart) + HookBlock/HookModify/HookContinue/StopResult
+│       │   ├── registry.py         # HookRegistry (显式 hook_kind 分类 + 优先级桶 + copy_with_overrides)
+│       │   └── pipeline.py         # run_pre_tool_use_hooks / run_post_tool_use_hooks / run_stop_hooks / run_subagent_start_hooks
 │       │
 │       ├── session/                # 🔶 会话运行时层 (Phase A 已完成, Phase B 待实现)
 │       │   ├── __init__.py
@@ -2814,16 +3078,20 @@ agent-core/
 │       │   ├── consistency.py      # 4 项一致性验证
 │       │   └── prompts.py          # 可自定义的 prompt 模板常量
 │       │
-│       ├── skills/                 # ⬜ Skills 系统 (待实现 — Item 9)
-│       │   ├── __init__.py
-│       │   ├── loader.py           # SKILL.md 扫描 + frontmatter 解析
-│       │   ├── executor.py         # inline / fork 执行
-│       │   └── permissions.py      # Skill 权限匹配
+│       ├── skills/                 # ✅ Skills 系统 (Item 9)
+│       │   ├── __init__.py         # 公开导出
+│       │   ├── definition.py       # SkillDefinition + SkillParameter 模型
+│       │   ├── registry.py         # SkillRegistry (首遇优先覆盖, source tracking)
+│       │   ├── loader.py           # load_skill_from_markdown + discover_skills (<dir>/<name>/SKILL.md)
+│       │   ├── executor.py         # render_template + execute_skill_inline / execute_skill_fork
+│       │   ├── tool.py             # SkillTool (name="Skill", @register_tool)
+│       │   └── permissions.py      # SkillPermissionEngine (fnmatch allow/deny/ask)
 │       │
-│       ├── plugins/                # ⬜ Plugin 系统 (待实现 — Item 9)
-│       │   ├── __init__.py
-│       │   ├── registry.py         # entry_points 发现 + 手动注册
-│       │   └── lifecycle.py        # enable / disable
+│       ├── plugins/                # ✅ Plugin 系统 (Item 9)
+│       │   ├── __init__.py         # 公开导出
+│       │   ├── base.py             # Plugin 抽象基类 (tools/hooks/agents/skills)
+│       │   ├── registry.py         # PluginRegistry (entry_points 发现 + 手动注册)
+│       │   └── lifecycle.py        # safe_enable_plugins / safe_disable_all
 │       │
 │       ├── persistence/            # ⬜ 会话持久化 (待实现 — Item 10)
 │       │   ├── __init__.py
@@ -2839,7 +3107,7 @@ agent-core/
 ├── tests/
 │   ├── __init__.py
 │   ├── conftest.py                 # pytest fixtures (default_config, custom_config)
-│   ├── unit/                       # 单元测试 (~700 tests)
+│   ├── unit/                       # 单元测试 (~755 tests, 48 files)
 │   │   ├── conftest.py
 │   │   ├── test_models.py          # AgentConfig / ModelId / CompressionConfig 模型校验
 │   │   ├── test_messages.py        # AgentResult / AgentMessage  discriminated union
@@ -2876,7 +3144,9 @@ agent-core/
 │   │   ├── test_agent_lifecycle.py # 生命周期状态/通知 XML/进度摘要
 │   │   ├── test_agent_fork.py      # filter_incomplete_tool_calls / Fork 不可变
 │   │   ├── test_session_state.py   # SessionState 快照/记录/清空
-│   │   ├── test_hooks.py            # ⬜ (桩 — Item 9)
+│   │   ├── test_hooks.py            # ✅ Hooks 系统 (36 tests — Item 9)
+│   │   ├── test_plugins.py          # ✅ Plugin 系统 (18 tests — Item 9)
+│   │   ├── test_skills.py           # ✅ Skills 系统 (24 tests — Item 9)
 │   ├── integration/                # mock model 集成测试 (无真实 API)
 │   │   ├── conftest.py
 │   │   ├── mock_model.py           # MockClient / make_text_turn / make_tool_use_turn

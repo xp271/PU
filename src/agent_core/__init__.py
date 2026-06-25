@@ -6,7 +6,21 @@ from .agents import (
     list_agents,
     register_agent,
 )
+from .hooks import (
+    HookBlock,
+    HookContinue,
+    HookModify,
+    HookRegistry,
+    HookResult,
+    PostToolUseHook,
+    PreToolUseHook,
+    StopHook,
+    StopResult,
+    SubagentStartHook,
+)
 from .mcp import McpSessionManager, register_mcp_tools
+from .plugins import Plugin, PluginRegistry
+from .skills import SkillDefinition, SkillRegistry, SkillTool
 from .models import (
     AgentConfig,
     AgentMessage,
@@ -59,6 +73,11 @@ __all__ = [
     "get_agent",
     "GlobTool",
     "GrepTool",
+    "HookBlock",
+    "HookContinue",
+    "HookModify",
+    "HookRegistry",
+    "HookResult",
     "list_agents",
     "McpOAuthConfig",
     "McpServerConfig",
@@ -66,7 +85,17 @@ __all__ = [
     "McpSessionManager",
     "ModelId",
     "ModelProvider",
+    "Plugin",
+    "PluginRegistry",
+    "PostToolUseHook",
+    "PreToolUseHook",
     "register_agent",
+    "SkillDefinition",
+    "SkillRegistry",
+    "SkillTool",
+    "StopHook",
+    "StopResult",
+    "SubagentStartHook",
     "Tool",
     "ToolCallResult",
     "ToolRegistry",

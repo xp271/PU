@@ -48,6 +48,10 @@ from .budget import estimate_tokens_from_messages, get_context_window, TokenBudg
 from .context import enrich_context
 from .truncate import hard_truncate
 from ..compression.trigger import can_compress
+from ..hooks.pipeline import run_stop_hooks
+from ..skills.loader import discover_skills
+from ..skills.registry import SkillRegistry
+from ..skills.tool import _set_skill_registry
 from ..compression.summarizer import compress, CompressionError
 
 # Re-export for callers that only import from query
@@ -69,6 +73,7 @@ async def query(
     system: str | None = None,
     initial_messages: list[dict[str, Any]] | None = None,
     session_store: SessionPermissionStore | None = None,
+    hook_registry: Any = None,
 ) -> AsyncGenerator[AgentMessage, None]:
     """Run the full agent turn loop for a single user prompt.
 
@@ -113,6 +118,7 @@ async def query(
             system=system,
             initial_messages=initial_messages,
             session_store=session_store,
+            hook_registry=hook_registry,
         ):
             yield message
     finally:
@@ -159,6 +165,7 @@ async def _run_turns(
     system: str | None = None,
     initial_messages: list[dict[str, Any]] | None = None,
     session_store: SessionPermissionStore | None = None,
+    hook_registry: Any = None,
 ) -> AsyncGenerator[AgentMessage, None]:
     """Run the agent turn loop.
 
@@ -190,6 +197,16 @@ async def _run_turns(
 
     notification_queue: list[str] = []
 
+    # §Item 9: ensure a per-query HookRegistry exists even when query() is
+    # invoked directly (CLI / tests / fork).  When the caller (Agent.stream)
+    # already supplied one it is used as-is; otherwise we derive a fresh
+    # instance from the read-only template plus this config's hooks.  This
+    # also gives plugin/config hooks a registry to inject into.
+    if hook_registry is None:
+        from ..hooks.registry import _default_hook_registry
+
+        hook_registry = _default_hook_registry.copy_with_overrides(config.hooks)
+
     tool_context = ToolUseContext(
         abort_signal=asyncio.Event(),
         read_file_state={},
@@ -205,7 +222,50 @@ async def _run_turns(
         parent_disallowed_tools=frozenset(),
         agent_depth=0,
         notification_queue=notification_queue,
+        hook_registry=hook_registry,
     )
+
+    # §Item 9: bootstrap skill registry (per-query instance).
+    # Discovery touches the filesystem; offload to a thread so the event
+    # loop is never blocked during startup.  Precedence is first-wins:
+    # config.skills_dir > project (.agent/skills) > user (~/.agent/skills).
+    skill_registry = SkillRegistry()
+    search_dirs: list[tuple[str, str]] = []
+    if config.skills_dir:
+        search_dirs.append((config.skills_dir, "config"))
+    if workspace_root:
+        search_dirs.append(
+            (os.path.join(workspace_root, ".agent", "skills"), "project")
+        )
+    search_dirs.append(
+        (os.path.join(os.path.expanduser("~"), ".agent", "skills"), "user")
+    )
+    for directory, source in search_dirs:
+        discovered = await asyncio.to_thread(discover_skills, directory)
+        for name, sd in discovered.items():
+            if skill_registry.contains(name):
+                continue  # first-wins: higher-precedence dir already supplied it
+            skill_registry.register(sd, source=source)
+    _set_skill_registry(tool_context, skill_registry)
+
+    # §Item 9: bootstrap plugins — contributions flow into the per-query
+    # hook/skill registries (and the query tool registry / global agent
+    # registry).  Failures in any one plugin are logged and skipped.
+    if config.auto_enable_plugins:
+        from ..agents.registry import _default_registry as _agent_registry
+        from ..plugins.lifecycle import safe_enable_plugins
+        from ..plugins.registry import PluginRegistry
+
+        plugin_registry = PluginRegistry()
+        plugin_registry.discover()
+        await safe_enable_plugins(
+            plugin_registry,
+            config.auto_enable_plugins,
+            tool_registry=registry,
+            hook_registry=hook_registry,
+            skill_registry=skill_registry,
+            agent_registry=_agent_registry,
+        )
 
     model_id = config.model_id
     client = get_client(model_id, config)
@@ -237,6 +297,20 @@ async def _run_turns(
                 "role": "user",
                 "content": [{"type": "text", "text": pending}],
             })
+
+        # -- 2a0.5. Stop hook (§Item 9) ----------------------------------------
+        if hook_registry is not None and hook_registry.stop_hooks():
+            stop_result = await run_stop_hooks(messages, tool_context, hook_registry)
+            if stop_result.should_stop:
+                if stop_result.message:
+                    yield AssistantText(content=stop_result.message)
+                await _drain_background_agents(tool_context)
+                yield DoneMessage(
+                    stop_reason="end_turn",
+                    total_tokens=total_tokens,
+                    final_messages=messages,
+                )
+                return
 
         # -- 2a. Budget / truncation check before the LLM call --------------
         if budget.is_exhausted():
@@ -603,15 +677,16 @@ async def run_tool_use(
     permission_engine: PermissionEngine | None = None,
     registry: ToolRegistry | None = None,
 ) -> ToolResult:
-    """Execute a single tool-use through its 7-step lifecycle:
+    """Execute a single tool-use through its lifecycle:
 
     1. resolve   — registry lookup
     2. validate  — Pydantic validation
     3. bash_guard — BashTool AST safety check
     4. permission — engine + callback
-    5. pre-hooks  — (placeholder — hooks system not yet implemented, Item 9)
+    5. pre-hooks  — PreToolUseHook chain (block/modify/continue)
     6. execute   — ``tool.call()``
-    7. persist   — large results → temp file, truncated preview
+    7. post-hooks — PostToolUseHook chain (before persist)
+    8. persist   — large results → temp file, truncated preview
     """
     if registry is None:
         registry = _default_registry
@@ -638,42 +713,81 @@ async def run_tool_use(
             is_error=True,
         )
 
-    # ---- 3. bash_guard (BashTool only) --------------------------------------
-    if tool.name == "Bash":
-        command = tool_use.tool_input.get("command", "")
-        if command:
-            safety = analyze_bash_command(command)
-            if not safety.safe:
+    # ---- 3~5. guard + permission + pre-hooks (converge on effective_input) --
+    #
+    # Helper: run bash_guard + permission on *inp*.  Returns an error
+    # ToolResult when the checks fail, or None when they pass.
+    async def _guard_and_permit(inp: dict[str, Any]) -> ToolResult | None:
+        # 3. bash_guard (BashTool only)
+        if tool.name == "Bash":
+            command = inp.get("command", "")
+            if command:
+                safety = analyze_bash_command(command)
+                if not safety.safe:
+                    return ToolResult(
+                        tool_use_id=tool_use.tool_use_id,
+                        tool_name=tool_use.tool_name,
+                        content=(
+                            "Bash command blocked by safety check:\n"
+                            + "\n".join(f"  - {w}" for w in safety.warnings)
+                        ),
+                        is_error=True,
+                    )
+        # 4. permission
+        decision = await engine.check(
+            tool_name=tool_use.tool_name,
+            tool_input=inp,
+            callback=permission_callback,
+            tool_is_read_only=tool.is_read_only,
+            tool_is_destructive=tool.is_destructive,
+        )
+        if not decision.allowed:
+            return ToolResult(
+                tool_use_id=tool_use.tool_use_id,
+                tool_name=tool_use.tool_name,
+                content=f"Permission denied: {decision.reason}",
+                is_error=True,
+            )
+        return None
+
+    engine = permission_engine or PermissionEngine()
+    effective_input: dict[str, Any] = tool_use.tool_input
+
+    # First guard + permit (on original input)
+    err = await _guard_and_permit(effective_input)
+    if err is not None:
+        return err
+
+    # 5. pre-hooks (§Item 9)
+    hook_registry = getattr(context, "hook_registry", None)
+    if hook_registry is not None and not hook_registry.is_empty():
+        from ..hooks.pipeline import run_pre_tool_use_hooks
+
+        modified_input, block_reason = await run_pre_tool_use_hooks(
+            tool_use.tool_name, effective_input, context, hook_registry
+        )
+        if block_reason is not None:
+            return ToolResult(
+                tool_use_id=tool_use.tool_use_id,
+                tool_name=tool_use.tool_name,
+                content=f"Tool blocked by pre-use hook: {block_reason}",
+                is_error=True,
+            )
+        if modified_input is not None:
+            effective_input = modified_input
+            # Re-validate + re-run guard/permission on the hook-modified input
+            try:
+                validated_input = tool.validate_input(effective_input)
+            except Exception as exc:
                 return ToolResult(
                     tool_use_id=tool_use.tool_use_id,
                     tool_name=tool_use.tool_name,
-                    content=(
-                        "Bash command blocked by safety check:\n"
-                        + "\n".join(f"  - {w}" for w in safety.warnings)
-                    ),
+                    content=f"Invalid input (after pre-hook modify): {exc}",
                     is_error=True,
                 )
-
-    # ---- 4. permission ------------------------------------------------------
-    engine = permission_engine or PermissionEngine()
-    decision = await engine.check(
-        tool_name=tool_use.tool_name,
-        tool_input=tool_use.tool_input,
-        callback=permission_callback,
-        tool_is_read_only=tool.is_read_only,
-        tool_is_destructive=tool.is_destructive,
-    )
-    if not decision.allowed:
-        return ToolResult(
-            tool_use_id=tool_use.tool_use_id,
-            tool_name=tool_use.tool_name,
-            content=f"Permission denied: {decision.reason}",
-            is_error=True,
-        )
-
-    # ---- 5. pre-hooks (placeholder — Item 9) --------------------------------
-    # Hooks system not yet implemented.  When available, iterate registered
-    # PreToolUse hooks here; any hook returning "block" terminates early.
+            err = await _guard_and_permit(effective_input)
+            if err is not None:
+                return err
 
     # ---- 6. execute ---------------------------------------------------------
     try:
@@ -686,7 +800,15 @@ async def run_tool_use(
             is_error=True,
         )
 
-    # ---- 7. persist — large results → temp file (async I/O) -------------------
+    # ---- 7. post-hooks (§Item 9 — before persist, on full ToolCallResult) ---
+    if hook_registry is not None and not hook_registry.is_empty():
+        from ..hooks.pipeline import run_post_tool_use_hooks
+
+        result = await run_post_tool_use_hooks(
+            tool_use.tool_name, effective_input, result, context, hook_registry
+        )
+
+    # ---- 8. persist — large results → temp file (async I/O) -------------------
     content, is_error = await _persist_large_result(
         result, tool_use.tool_name, context.agent_id,
     )

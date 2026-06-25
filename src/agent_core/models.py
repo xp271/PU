@@ -271,6 +271,10 @@ class AgentConfig(BaseModel):
             "(not yet wired — Item 9; values are currently ignored)"
         ),
     )
+    auto_enable_plugins: list[str] = Field(
+        default_factory=list,
+        description="Plugin names to auto-enable at agent startup (Item 9)",
+    )
     allow_unknown_model: bool = Field(
         default=False,
         description=(

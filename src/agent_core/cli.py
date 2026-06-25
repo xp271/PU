@@ -213,6 +213,7 @@ Commands:
   /model <provider/name>   Switch model (e.g. /model openai/gpt-4o)
   /key <provider> <key>    Set API key for a provider
   /clear                   Clear conversation history (keeps session permissions)
+  /skills                  List loaded skills
   /help                    Show this help
   /quit                    Exit"""
 
@@ -247,8 +248,40 @@ def _handle_command(config: AgentConfig, text: str) -> bool:
         print(f"API key updated for: {provider}")
         return False
 
+    if cmd == "/skills":
+        _list_skills(config)
+        return False
+
     print(f"Unknown command: {cmd}. Type /help for available commands.")
     return False
+
+
+def _list_skills(config: AgentConfig) -> None:
+    """Print all discoverable skills to stdout."""
+    from .skills.loader import discover_skills
+
+    search_dirs: list[str] = []
+    if config.skills_dir:
+        search_dirs.append(config.skills_dir)
+    cwd = os.getcwd()
+    search_dirs.append(os.path.join(cwd, ".agent", "skills"))
+    search_dirs.append(os.path.join(os.path.expanduser("~"), ".agent", "skills"))
+
+    all_skills: dict[str, Any] = {}
+    for d in search_dirs:
+        for name, sd in discover_skills(d).items():
+            if name not in all_skills:
+                all_skills[name] = sd
+
+    if not all_skills:
+        print("(no skills found)")
+        print("Place SKILL.md files in .agent/skills/<name>/SKILL.md")
+        return
+
+    for name, sd in all_skills.items():
+        mode = sd.execution_mode or "inline"
+        bg = " [background]" if sd.background else ""
+        print(f"  {name} ({mode}{bg}) — {sd.description or '(no description)'}")
 
 
 async def _permission_callback(

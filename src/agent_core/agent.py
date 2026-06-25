@@ -5,11 +5,10 @@ from collections.abc import AsyncGenerator
 from contextlib import aclosing
 
 from .models import AgentConfig, AgentMessage, AgentResult, StopReason
-# Single source of truth for the callback type — re-exported here for callers
-# that import it from ``agent``.
 from .permissions.engine import PermissionCallback
 from .query import query
 from .session import SessionState
+from .hooks.registry import _default_hook_registry
 
 __all__ = ["Agent", "PermissionCallback"]
 
@@ -64,6 +63,11 @@ class Agent:
         # teardown (query's finally) never runs at event-loop shutdown in a
         # different task (anyio cancel-scope requirement).
         session = self._session
+        # §Item 9: per-query HookRegistry, derived from the read-only global
+        # template and extended with this agent's config.hooks.
+        hook_registry = _default_hook_registry.copy_with_overrides(
+            self._config.hooks
+        )
         async with aclosing(
             query(
                 prompt=prompt,
@@ -75,6 +79,7 @@ class Agent:
                     session.snapshot_for_next_turn() if session is not None else None
                 ),
                 session_store=session.permission_store if session is not None else None,
+                hook_registry=hook_registry,
             )
         ) as stream:
             async for message in stream:

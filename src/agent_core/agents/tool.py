@@ -181,7 +181,21 @@ class AgentTool(Tool):
 
         agent_id = uuid.uuid4().hex
 
-        # -- 4. route ---------------------------------------------------------
+        # -- 4. SubagentStart hook (§Item 9) -----------------------------------
+        hook_registry = getattr(context, "hook_registry", None)
+        if hook_registry is not None and not hook_registry.is_empty():
+            from ..hooks.pipeline import run_subagent_start_hooks
+
+            blocked, reason = await run_subagent_start_hooks(
+                input.subagent_type, input.prompt, definition, context, hook_registry
+            )
+            if blocked:
+                return ToolCallResult(
+                    content=f"Sub-agent blocked: {reason or 'denied by hook'}",
+                    is_error=True,
+                )
+
+        # -- 5. route ---------------------------------------------------------
         if input.run_in_background or definition.background:
             return await self._run_async(agent_id, definition, input.prompt, context)
         return await self._run_sync(agent_id, definition, input.prompt, context)
