@@ -200,3 +200,57 @@ class TestTurnTracer:
         record = caplog.records[0]
         assert record.trace_id == "trace-abort"  # type: ignore[attr-defined]
         assert record.provider == "test"  # type: ignore[attr-defined]
+
+
+@pytest.mark.agent
+class TestTurnTracerRecorder:
+    """Item 12: the tracer optionally forwards the metric payload to a
+    ConversationRecorder, in addition to the standard logging record."""
+
+    @pytest.mark.asyncio
+    async def test_no_recorder_only_logs(self, caplog: pytest.LogCaptureFixture) -> None:
+        caplog.set_level(logging.INFO, logger="agent_core.turn")
+        tracer = TurnTracer(trace_id="t")  # recorder defaults to None
+        events: list[InternalEvent] = [
+            StreamStart(turn_index=0, provider="test", model="v1"),
+            TokenCounts(input_tokens=1, output_tokens=1),
+            StopEvent(stop_reason="end_turn"),
+        ]
+        async for _ in tracer.wrap(_mock_stream(*events)):
+            pass
+        assert len(caplog.records) == 1  # no sink errors, just the log
+
+    @pytest.mark.asyncio
+    async def test_recorder_receives_turn_metric(self) -> None:
+        captured: list[dict[str, Any]] = []
+
+        class _Rec:
+            async def emit_turn_metric(self, payload: dict[str, Any]) -> None:
+                captured.append(payload)
+
+        tracer = TurnTracer(trace_id="t", recorder=_Rec())
+        events: list[InternalEvent] = [
+            StreamStart(turn_index=4, provider="anthropic", model="claude"),
+            TokenCounts(input_tokens=10, output_tokens=5),
+            StopEvent(stop_reason="end_turn"),
+        ]
+        async for _ in tracer.wrap(_mock_stream(*events)):
+            pass
+        assert len(captured) == 1
+        assert captured[0]["turn_index"] == 4
+        assert captured[0]["provider"] == "anthropic"
+
+    @pytest.mark.asyncio
+    async def test_recorder_fault_does_not_break_stream(self) -> None:
+        class _BadRec:
+            async def emit_turn_metric(self, payload: dict[str, Any]) -> None:
+                raise RuntimeError("sink down")
+
+        tracer = TurnTracer(trace_id="t", recorder=_BadRec())
+        events: list[InternalEvent] = [
+            StreamStart(turn_index=0, provider="test", model="v1"),
+            StopEvent(stop_reason="end_turn"),
+        ]
+        # Must not propagate the recorder error.
+        async for _ in tracer.wrap(_mock_stream(*events)):
+            pass

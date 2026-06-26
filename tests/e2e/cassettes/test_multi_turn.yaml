@@ -1,0 +1,742 @@
+interactions:
+- request:
+    body: "{\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"List
+      all Python files in C:\\\\Users\\\\\u9093\u7965\u9E4F\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-\u9093\u7965\u9E4F\\\\pytest-146\\\\test_multi_turn0
+      using Glob, then read one of them and tell me what it does.\"}]}],\"model\":\"claude-haiku-4-5\",\"system\":\"Today's
+      date is 2026-06-25.\\n\\n<environment>\\n  Platform: win32\\n  Shell: C:\\\\WINDOWS\\\\system32\\\\cmd.exe\\n
+      \ Workspace: C:\\\\PU\\n</environment>\\n\\n<git_status>\\nM .gitignore\\n M
+      README.md\\n M agent-core-todolist-python.md\\n M pyproject.toml\\n M tests/e2e/conftest.py\\n
+      M tests/e2e/test_compression.py\\n M tests/e2e/test_turn_flow.py\\n M tests/integration/conftest.py\\n
+      D tests/integration/test_fork.py\\n D tests/integration/test_permission_inheritance.py\\n
+      D tests/integration/test_subagent.py\\n D tests/integration/test_tool_pipeline.py\\n
+      M uv.lock\\n?? .github/\\n?? docs/api/agent.md\\n?? docs/api/permissions.md\\n??
+      docs/api/tools.md\\n?? docs/guides/mcp.md\\n?? docs/guides/subagent.md\\n??
+      docs/index.md\\n?? docs/quickstart.md\\n?? examples/basic_run.py\\n?? examples/permission_callback.py\\n??
+      examples/session_resume.py\\n?? examples/streaming.py\\n?? mkdocs.yml\\n?? plan/item-11-test-docs-release-plan.md\\n??
+      tests/e2e/cassettes/\\n</git_status>\",\"tools\":[{\"name\":\"Bash\",\"description\":\"\",\"input_schema\":{\"properties\":{\"command\":{\"description\":\"Shell
+      command to execute\",\"title\":\"Command\",\"type\":\"string\"},\"timeout\":{\"default\":120.0,\"description\":\"Timeout
+      in seconds\",\"maximum\":600,\"minimum\":1,\"title\":\"Timeout\",\"type\":\"number\"},\"working_dir\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Working
+      directory for the command\",\"title\":\"Working Dir\"}},\"required\":[\"command\"],\"title\":\"BashInput\",\"type\":\"object\"}},{\"name\":\"Edit\",\"description\":\"\",\"input_schema\":{\"properties\":{\"file_path\":{\"description\":\"Absolute
+      path to the file to edit\",\"title\":\"File Path\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact
+      text to search for and replace\",\"title\":\"Old String\",\"type\":\"string\"},\"new_string\":{\"description\":\"Replacement
+      text\",\"title\":\"New String\",\"type\":\"string\"}},\"required\":[\"file_path\",\"old_string\",\"new_string\"],\"title\":\"FileEditInput\",\"type\":\"object\"}},{\"name\":\"Read\",\"description\":\"\",\"input_schema\":{\"properties\":{\"file_path\":{\"description\":\"Absolute
+      path to the file to read\",\"title\":\"File Path\",\"type\":\"string\"},\"offset\":{\"default\":0,\"description\":\"Line
+      offset to start reading from\",\"minimum\":0,\"title\":\"Offset\",\"type\":\"integer\"},\"limit\":{\"default\":2000,\"description\":\"Maximum
+      number of lines to read\",\"maximum\":10000,\"minimum\":1,\"title\":\"Limit\",\"type\":\"integer\"},\"max_bytes\":{\"default\":500000,\"description\":\"Maximum
+      bytes to read (safety cap)\",\"minimum\":1,\"title\":\"Max Bytes\",\"type\":\"integer\"}},\"required\":[\"file_path\"],\"title\":\"FileReadInput\",\"type\":\"object\"}},{\"name\":\"Write\",\"description\":\"\",\"input_schema\":{\"properties\":{\"file_path\":{\"description\":\"Absolute
+      path to the file to create or overwrite\",\"title\":\"File Path\",\"type\":\"string\"},\"content\":{\"description\":\"Content
+      to write to the file\",\"title\":\"Content\",\"type\":\"string\"}},\"required\":[\"file_path\",\"content\"],\"title\":\"FileWriteInput\",\"type\":\"object\"}},{\"name\":\"Glob\",\"description\":\"\",\"input_schema\":{\"properties\":{\"pattern\":{\"description\":\"Glob
+      pattern to match files (e.g. '**/*.py')\",\"title\":\"Pattern\",\"type\":\"string\"},\"path\":{\"default\":\".\",\"description\":\"Base
+      directory for glob search\",\"title\":\"Path\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"title\":\"GlobInput\",\"type\":\"object\"}},{\"name\":\"Grep\",\"description\":\"\",\"input_schema\":{\"properties\":{\"pattern\":{\"description\":\"Regular
+      expression pattern to search for\",\"title\":\"Pattern\",\"type\":\"string\"},\"path\":{\"default\":\".\",\"description\":\"File
+      or directory to search in\",\"title\":\"Path\",\"type\":\"string\"},\"glob\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Glob
+      pattern to filter files (e.g. '*.py')\",\"title\":\"Glob\"},\"output_mode\":{\"default\":\"files_with_matches\",\"description\":\"Output
+      mode\",\"enum\":[\"files_with_matches\",\"content\",\"count\"],\"title\":\"Output
+      Mode\",\"type\":\"string\"},\"head_limit\":{\"default\":100,\"description\":\"Maximum
+      number of output lines\",\"maximum\":1000,\"minimum\":1,\"title\":\"Head Limit\",\"type\":\"integer\"},\"offset\":{\"default\":0,\"description\":\"Skip
+      first N matches before applying head_limit\",\"minimum\":0,\"title\":\"Offset\",\"type\":\"integer\"},\"context_around\":{\"default\":0,\"description\":\"Context
+      lines around match (-C)\",\"maximum\":10,\"minimum\":0,\"title\":\"Context Around\",\"type\":\"integer\"},\"ignore_case\":{\"default\":false,\"description\":\"Case
+      insensitive search (-i)\",\"title\":\"Ignore Case\",\"type\":\"boolean\"},\"multiline\":{\"default\":false,\"description\":\"Enable
+      multiline mode (-U --multiline-dotall)\",\"title\":\"Multiline\",\"type\":\"boolean\"}},\"required\":[\"pattern\"],\"title\":\"GrepInput\",\"type\":\"object\"}},{\"name\":\"Skill\",\"description\":\"Tool
+      that lets the LLM execute named skills.\\n\\n    Skills are pre-loaded from
+      ``.agent/skills/`` directories (project\\n    and user level) and optionally
+      contributed by plugins.\",\"input_schema\":{\"description\":\"Validated input
+      for the ``Skill`` tool.\",\"properties\":{\"skill\":{\"description\":\"Skill
+      name, e.g. 'review-pr'.\",\"title\":\"Skill\",\"type\":\"string\"},\"arguments\":{\"additionalProperties\":{\"type\":\"string\"},\"description\":\"Key-value
+      pairs passed to the skill template.\",\"title\":\"Arguments\",\"type\":\"object\"},\"mode\":{\"anyOf\":[{\"enum\":[\"inline\",\"fork\"],\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Override
+      the skill's default execution mode.\",\"title\":\"Mode\"}},\"required\":[\"skill\"],\"title\":\"SkillInput\",\"type\":\"object\"}},{\"name\":\"Agent\",\"description\":\"Tool
+      that lets the LLM create sub-agents for complex multi-step tasks.\\n\\n    The
+      LLM provides ``description``, ``prompt``, and optionally a\\n    ``subagent_type``.
+      \ This tool resolves the agent definition, sets\\n    up the child execution
+      environment, and routes to either synchronous\\n    (inline) or asynchronous
+      (background) execution.\",\"input_schema\":{\"description\":\"Validated input
+      for the ``Agent`` tool.\",\"properties\":{\"description\":{\"description\":\"A
+      short (3-5 word) description of the task.\",\"title\":\"Description\",\"type\":\"string\"},\"prompt\":{\"description\":\"The
+      task for the agent to perform.\",\"title\":\"Prompt\",\"type\":\"string\"},\"subagent_type\":{\"default\":\"GeneralPurpose\",\"description\":\"Agent
+      type, e.g. 'Explore', 'Plan', 'GeneralPurpose'.\",\"title\":\"Subagent Type\",\"type\":\"string\"},\"model\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Optional
+      model override (alias: sonnet/opus/haiku).\",\"title\":\"Model\"},\"run_in_background\":{\"default\":false,\"description\":\"Run
+      in background and notify when done.\",\"title\":\"Run In Background\",\"type\":\"boolean\"}},\"required\":[\"description\",\"prompt\"],\"title\":\"AgentInput\",\"type\":\"object\"}}],\"stream\":true}"
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '6743'
+      Content-Type:
+      - application/json
+      Host:
+      - api.deepseek.com
+      User-Agent:
+      - AsyncAnthropic/Python 0.105.2
+      X-Stainless-Arch:
+      - other:amd64
+      X-Stainless-Async:
+      - async:asyncio
+      X-Stainless-Helper-Method:
+      - stream
+      X-Stainless-Lang:
+      - python
+      X-Stainless-OS:
+      - Windows
+      X-Stainless-Package-Version:
+      - 0.105.2
+      X-Stainless-Runtime:
+      - CPython
+      X-Stainless-Runtime-Version:
+      - 3.12.13
+      X-Stainless-Stream-Helper:
+      - messages
+      anthropic-version:
+      - '2023-06-01'
+      x-stainless-read-timeout:
+      - '600'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-timeout:
+      - NOT_GIVEN
+    method: POST
+    uri: https://api.deepseek.com/anthropic/v1/messages
+  response:
+    body:
+      string: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"4fc45086-7bff-4ed0-8f14-18ca51f53953\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-v4-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":133,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":2048,\"output_tokens\":0,\"service_tier\":\"standard\"}}}\n\nevent:
+        content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\nevent:
+        ping\ndata: {\"type\":\"ping\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"The\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        user\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        wants\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        me\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        to\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        list\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        all\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        Python\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        files\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        in\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        a\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        specific\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        directory\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        using\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        Glob\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\",\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        then\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        read\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        one\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        of\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        them\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        and\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        explain\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        what\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        it\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        does\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\".\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"4fc45086-7bff-4ed0-8f14-18ca51f53953\"}}\n\nevent:
+        content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent:
+        content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_00_DTzO0O7vYYBx1Vr1xx1m3938\",\"name\":\"Glob\",\"input\":{}}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"pattern\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":
+        \"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"**\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"/*\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\".\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"py\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\",
+        \"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"path\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":
+        \"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"C\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"Users\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u9093\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u7965\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u9E4F\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"App\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"Data\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"Local\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"Temp\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"p\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"ytest\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"-of\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"-\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u9093\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u7965\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u9E4F\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"p\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"ytest\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"-\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"146\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"test\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"_m\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"ulti\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"_t\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"urn\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"0\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"}\"}}\n\nevent:
+        content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent:
+        message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":133,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":2048,\"output_tokens\":123,\"service_tier\":\"standard\"}}\n\nevent:
+        message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    headers:
+      Connection:
+      - keep-alive
+      Content-Type:
+      - text/event-stream; charset=utf-8
+      Date:
+      - Thu, 25 Jun 2026 15:10:52 GMT
+      Server:
+      - elb
+      Strict-Transport-Security:
+      - max-age=31536000; includeSubDomains; preload
+      Transfer-Encoding:
+      - chunked
+      Via:
+      - 1.1 d6a8fd11b3bf4867ce673aa444e83f86.cloudfront.net (CloudFront)
+      X-Amz-Cf-Id:
+      - 3FxZNJV_hdtU-uCa8vDILuRKFLP9rWYnv_4RaZzZJOuRqhMdebUFcg==
+      X-Amz-Cf-Pop:
+      - NRT12-P9
+      X-Cache:
+      - Miss from cloudfront
+      X-Content-Type-Options:
+      - nosniff
+      access-control-allow-credentials:
+      - 'true'
+      cache-control:
+      - no-cache
+      vary:
+      - origin, access-control-request-method, access-control-request-headers
+      x-ds-trace-id:
+      - 661b3bcfc61f626e22c55515c7ba5440
+    status:
+      code: 200
+      message: OK
+- request:
+    body: "{\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"List
+      all Python files in C:\\\\Users\\\\\u9093\u7965\u9E4F\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-\u9093\u7965\u9E4F\\\\pytest-146\\\\test_multi_turn0
+      using Glob, then read one of them and tell me what it does.\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call_00_DTzO0O7vYYBx1Vr1xx1m3938\",\"name\":\"Glob\",\"input\":{\"pattern\":\"**/*.py\",\"path\":\"C:\\\\Users\\\\\u9093\u7965\u9E4F\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-\u9093\u7965\u9E4F\\\\pytest-146\\\\test_multi_turn0\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call_00_DTzO0O7vYYBx1Vr1xx1m3938\",\"content\":\"C:\\\\Users\\\\\u9093\u7965\u9E4F\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-\u9093\u7965\u9E4F\\\\pytest-146\\\\test_multi_turn0\\\\src\\\\main.py\",\"is_error\":false}]}],\"model\":\"claude-haiku-4-5\",\"system\":\"Today's
+      date is 2026-06-25.\\n\\n<environment>\\n  Platform: win32\\n  Shell: C:\\\\WINDOWS\\\\system32\\\\cmd.exe\\n
+      \ Workspace: C:\\\\PU\\n</environment>\\n\\n<git_status>\\nM .gitignore\\n M
+      README.md\\n M agent-core-todolist-python.md\\n M pyproject.toml\\n M tests/e2e/conftest.py\\n
+      M tests/e2e/test_compression.py\\n M tests/e2e/test_turn_flow.py\\n M tests/integration/conftest.py\\n
+      D tests/integration/test_fork.py\\n D tests/integration/test_permission_inheritance.py\\n
+      D tests/integration/test_subagent.py\\n D tests/integration/test_tool_pipeline.py\\n
+      M uv.lock\\n?? .github/\\n?? docs/api/agent.md\\n?? docs/api/permissions.md\\n??
+      docs/api/tools.md\\n?? docs/guides/mcp.md\\n?? docs/guides/subagent.md\\n??
+      docs/index.md\\n?? docs/quickstart.md\\n?? examples/basic_run.py\\n?? examples/permission_callback.py\\n??
+      examples/session_resume.py\\n?? examples/streaming.py\\n?? mkdocs.yml\\n?? plan/item-11-test-docs-release-plan.md\\n??
+      tests/e2e/cassettes/\\n</git_status>\",\"tools\":[{\"name\":\"Bash\",\"description\":\"\",\"input_schema\":{\"properties\":{\"command\":{\"description\":\"Shell
+      command to execute\",\"title\":\"Command\",\"type\":\"string\"},\"timeout\":{\"default\":120.0,\"description\":\"Timeout
+      in seconds\",\"maximum\":600,\"minimum\":1,\"title\":\"Timeout\",\"type\":\"number\"},\"working_dir\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Working
+      directory for the command\",\"title\":\"Working Dir\"}},\"required\":[\"command\"],\"title\":\"BashInput\",\"type\":\"object\"}},{\"name\":\"Edit\",\"description\":\"\",\"input_schema\":{\"properties\":{\"file_path\":{\"description\":\"Absolute
+      path to the file to edit\",\"title\":\"File Path\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact
+      text to search for and replace\",\"title\":\"Old String\",\"type\":\"string\"},\"new_string\":{\"description\":\"Replacement
+      text\",\"title\":\"New String\",\"type\":\"string\"}},\"required\":[\"file_path\",\"old_string\",\"new_string\"],\"title\":\"FileEditInput\",\"type\":\"object\"}},{\"name\":\"Read\",\"description\":\"\",\"input_schema\":{\"properties\":{\"file_path\":{\"description\":\"Absolute
+      path to the file to read\",\"title\":\"File Path\",\"type\":\"string\"},\"offset\":{\"default\":0,\"description\":\"Line
+      offset to start reading from\",\"minimum\":0,\"title\":\"Offset\",\"type\":\"integer\"},\"limit\":{\"default\":2000,\"description\":\"Maximum
+      number of lines to read\",\"maximum\":10000,\"minimum\":1,\"title\":\"Limit\",\"type\":\"integer\"},\"max_bytes\":{\"default\":500000,\"description\":\"Maximum
+      bytes to read (safety cap)\",\"minimum\":1,\"title\":\"Max Bytes\",\"type\":\"integer\"}},\"required\":[\"file_path\"],\"title\":\"FileReadInput\",\"type\":\"object\"}},{\"name\":\"Write\",\"description\":\"\",\"input_schema\":{\"properties\":{\"file_path\":{\"description\":\"Absolute
+      path to the file to create or overwrite\",\"title\":\"File Path\",\"type\":\"string\"},\"content\":{\"description\":\"Content
+      to write to the file\",\"title\":\"Content\",\"type\":\"string\"}},\"required\":[\"file_path\",\"content\"],\"title\":\"FileWriteInput\",\"type\":\"object\"}},{\"name\":\"Glob\",\"description\":\"\",\"input_schema\":{\"properties\":{\"pattern\":{\"description\":\"Glob
+      pattern to match files (e.g. '**/*.py')\",\"title\":\"Pattern\",\"type\":\"string\"},\"path\":{\"default\":\".\",\"description\":\"Base
+      directory for glob search\",\"title\":\"Path\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"title\":\"GlobInput\",\"type\":\"object\"}},{\"name\":\"Grep\",\"description\":\"\",\"input_schema\":{\"properties\":{\"pattern\":{\"description\":\"Regular
+      expression pattern to search for\",\"title\":\"Pattern\",\"type\":\"string\"},\"path\":{\"default\":\".\",\"description\":\"File
+      or directory to search in\",\"title\":\"Path\",\"type\":\"string\"},\"glob\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Glob
+      pattern to filter files (e.g. '*.py')\",\"title\":\"Glob\"},\"output_mode\":{\"default\":\"files_with_matches\",\"description\":\"Output
+      mode\",\"enum\":[\"files_with_matches\",\"content\",\"count\"],\"title\":\"Output
+      Mode\",\"type\":\"string\"},\"head_limit\":{\"default\":100,\"description\":\"Maximum
+      number of output lines\",\"maximum\":1000,\"minimum\":1,\"title\":\"Head Limit\",\"type\":\"integer\"},\"offset\":{\"default\":0,\"description\":\"Skip
+      first N matches before applying head_limit\",\"minimum\":0,\"title\":\"Offset\",\"type\":\"integer\"},\"context_around\":{\"default\":0,\"description\":\"Context
+      lines around match (-C)\",\"maximum\":10,\"minimum\":0,\"title\":\"Context Around\",\"type\":\"integer\"},\"ignore_case\":{\"default\":false,\"description\":\"Case
+      insensitive search (-i)\",\"title\":\"Ignore Case\",\"type\":\"boolean\"},\"multiline\":{\"default\":false,\"description\":\"Enable
+      multiline mode (-U --multiline-dotall)\",\"title\":\"Multiline\",\"type\":\"boolean\"}},\"required\":[\"pattern\"],\"title\":\"GrepInput\",\"type\":\"object\"}},{\"name\":\"Skill\",\"description\":\"Tool
+      that lets the LLM execute named skills.\\n\\n    Skills are pre-loaded from
+      ``.agent/skills/`` directories (project\\n    and user level) and optionally
+      contributed by plugins.\",\"input_schema\":{\"description\":\"Validated input
+      for the ``Skill`` tool.\",\"properties\":{\"skill\":{\"description\":\"Skill
+      name, e.g. 'review-pr'.\",\"title\":\"Skill\",\"type\":\"string\"},\"arguments\":{\"additionalProperties\":{\"type\":\"string\"},\"description\":\"Key-value
+      pairs passed to the skill template.\",\"title\":\"Arguments\",\"type\":\"object\"},\"mode\":{\"anyOf\":[{\"enum\":[\"inline\",\"fork\"],\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Override
+      the skill's default execution mode.\",\"title\":\"Mode\"}},\"required\":[\"skill\"],\"title\":\"SkillInput\",\"type\":\"object\"}},{\"name\":\"Agent\",\"description\":\"Tool
+      that lets the LLM create sub-agents for complex multi-step tasks.\\n\\n    The
+      LLM provides ``description``, ``prompt``, and optionally a\\n    ``subagent_type``.
+      \ This tool resolves the agent definition, sets\\n    up the child execution
+      environment, and routes to either synchronous\\n    (inline) or asynchronous
+      (background) execution.\",\"input_schema\":{\"description\":\"Validated input
+      for the ``Agent`` tool.\",\"properties\":{\"description\":{\"description\":\"A
+      short (3-5 word) description of the task.\",\"title\":\"Description\",\"type\":\"string\"},\"prompt\":{\"description\":\"The
+      task for the agent to perform.\",\"title\":\"Prompt\",\"type\":\"string\"},\"subagent_type\":{\"default\":\"GeneralPurpose\",\"description\":\"Agent
+      type, e.g. 'Explore', 'Plan', 'GeneralPurpose'.\",\"title\":\"Subagent Type\",\"type\":\"string\"},\"model\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Optional
+      model override (alias: sonnet/opus/haiku).\",\"title\":\"Model\"},\"run_in_background\":{\"default\":false,\"description\":\"Run
+      in background and notify when done.\",\"title\":\"Run In Background\",\"type\":\"boolean\"}},\"required\":[\"description\",\"prompt\"],\"title\":\"AgentInput\",\"type\":\"object\"}}],\"stream\":true}"
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '7220'
+      Content-Type:
+      - application/json
+      Host:
+      - api.deepseek.com
+      User-Agent:
+      - AsyncAnthropic/Python 0.105.2
+      X-Stainless-Arch:
+      - other:amd64
+      X-Stainless-Async:
+      - async:asyncio
+      X-Stainless-Helper-Method:
+      - stream
+      X-Stainless-Lang:
+      - python
+      X-Stainless-OS:
+      - Windows
+      X-Stainless-Package-Version:
+      - 0.105.2
+      X-Stainless-Runtime:
+      - CPython
+      X-Stainless-Runtime-Version:
+      - 3.12.13
+      X-Stainless-Stream-Helper:
+      - messages
+      anthropic-version:
+      - '2023-06-01'
+      x-stainless-read-timeout:
+      - '600'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-timeout:
+      - NOT_GIVEN
+    method: POST
+    uri: https://api.deepseek.com/anthropic/v1/messages
+  response:
+    body:
+      string: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"69995103-7b78-46d7-b7fc-5797cfde9a8c\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-v4-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":50,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":2304,\"output_tokens\":0,\"service_tier\":\"standard\"}}}\n\nevent:
+        content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\nevent:
+        ping\ndata: {\"type\":\"ping\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"There\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"'s\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        one\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        Python\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        file\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        found\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\":\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        `\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"src\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"/main\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\".py\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"`.\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        Let\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        me\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        read\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        it\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\".\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"69995103-7b78-46d7-b7fc-5797cfde9a8c\"}}\n\nevent:
+        content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent:
+        content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"There\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        is\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        one\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        Python\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        file\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        in\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        that\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        directory\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\".\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        Let\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        me\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        read\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        it\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\":\"}}\n\nevent:
+        content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent:
+        content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_00_GOUkECsBQWl5EiifJ1Rq1987\",\"name\":\"Read\",\"input\":{}}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"file\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"_path\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":
+        \"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"C\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"Users\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u9093\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u7965\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u9E4F\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"App\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"Data\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"Local\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"Temp\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"p\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"ytest\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"-of\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"-\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u9093\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u7965\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\u9E4F\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"p\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"ytest\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"-\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"146\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"test\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"_m\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"ulti\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"_t\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"urn\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"0\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"src\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\\\\\\\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"main\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\".py\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"}\"}}\n\nevent:
+        content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\nevent:
+        message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":50,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":2304,\"output_tokens\":112,\"service_tier\":\"standard\"}}\n\nevent:
+        message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    headers:
+      Connection:
+      - keep-alive
+      Content-Type:
+      - text/event-stream; charset=utf-8
+      Date:
+      - Thu, 25 Jun 2026 15:10:53 GMT
+      Server:
+      - elb
+      Strict-Transport-Security:
+      - max-age=31536000; includeSubDomains; preload
+      Transfer-Encoding:
+      - chunked
+      Via:
+      - 1.1 ba44b79b21c26df8dd2de894afc966be.cloudfront.net (CloudFront)
+      X-Amz-Cf-Id:
+      - ukvb2Mlp67xiQvousaT6d7ULhCeEBk9jtGf_Iqee9gFQp5uDn7JP5w==
+      X-Amz-Cf-Pop:
+      - NRT20-P4
+      X-Cache:
+      - Miss from cloudfront
+      X-Content-Type-Options:
+      - nosniff
+      access-control-allow-credentials:
+      - 'true'
+      cache-control:
+      - no-cache
+      vary:
+      - origin, access-control-request-method, access-control-request-headers
+      x-ds-trace-id:
+      - a241cba36518748ca77d5c558d8ce68b
+    status:
+      code: 200
+      message: OK
+- request:
+    body: "{\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"List
+      all Python files in C:\\\\Users\\\\\u9093\u7965\u9E4F\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-\u9093\u7965\u9E4F\\\\pytest-146\\\\test_multi_turn0
+      using Glob, then read one of them and tell me what it does.\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call_00_DTzO0O7vYYBx1Vr1xx1m3938\",\"name\":\"Glob\",\"input\":{\"pattern\":\"**/*.py\",\"path\":\"C:\\\\Users\\\\\u9093\u7965\u9E4F\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-\u9093\u7965\u9E4F\\\\pytest-146\\\\test_multi_turn0\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call_00_DTzO0O7vYYBx1Vr1xx1m3938\",\"content\":\"C:\\\\Users\\\\\u9093\u7965\u9E4F\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-\u9093\u7965\u9E4F\\\\pytest-146\\\\test_multi_turn0\\\\src\\\\main.py\",\"is_error\":false}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"There\"},{\"type\":\"text\",\"text\":\"is\"},{\"type\":\"text\",\"text\":\"one\"},{\"type\":\"text\",\"text\":\"Python\"},{\"type\":\"text\",\"text\":\"file\"},{\"type\":\"text\",\"text\":\"in\"},{\"type\":\"text\",\"text\":\"that\"},{\"type\":\"text\",\"text\":\"directory\"},{\"type\":\"text\",\"text\":\".\"},{\"type\":\"text\",\"text\":\"Let\"},{\"type\":\"text\",\"text\":\"me\"},{\"type\":\"text\",\"text\":\"read\"},{\"type\":\"text\",\"text\":\"it\"},{\"type\":\"text\",\"text\":\":\"},{\"type\":\"tool_use\",\"id\":\"call_00_GOUkECsBQWl5EiifJ1Rq1987\",\"name\":\"Read\",\"input\":{\"file_path\":\"C:\\\\Users\\\\\u9093\u7965\u9E4F\\\\AppData\\\\Local\\\\Temp\\\\pytest-of-\u9093\u7965\u9E4F\\\\pytest-146\\\\test_multi_turn0\\\\src\\\\main.py\"}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call_00_GOUkECsBQWl5EiifJ1Rq1987\",\"content\":\"print('hello')\\n\",\"is_error\":false}]}],\"model\":\"claude-haiku-4-5\",\"system\":\"Today's
+      date is 2026-06-25.\\n\\n<environment>\\n  Platform: win32\\n  Shell: C:\\\\WINDOWS\\\\system32\\\\cmd.exe\\n
+      \ Workspace: C:\\\\PU\\n</environment>\\n\\n<git_status>\\nM .gitignore\\n M
+      README.md\\n M agent-core-todolist-python.md\\n M pyproject.toml\\n M tests/e2e/conftest.py\\n
+      M tests/e2e/test_compression.py\\n M tests/e2e/test_turn_flow.py\\n M tests/integration/conftest.py\\n
+      D tests/integration/test_fork.py\\n D tests/integration/test_permission_inheritance.py\\n
+      D tests/integration/test_subagent.py\\n D tests/integration/test_tool_pipeline.py\\n
+      M uv.lock\\n?? .github/\\n?? docs/api/agent.md\\n?? docs/api/permissions.md\\n??
+      docs/api/tools.md\\n?? docs/guides/mcp.md\\n?? docs/guides/subagent.md\\n??
+      docs/index.md\\n?? docs/quickstart.md\\n?? examples/basic_run.py\\n?? examples/permission_callback.py\\n??
+      examples/session_resume.py\\n?? examples/streaming.py\\n?? mkdocs.yml\\n?? plan/item-11-test-docs-release-plan.md\\n??
+      tests/e2e/cassettes/\\n</git_status>\",\"tools\":[{\"name\":\"Bash\",\"description\":\"\",\"input_schema\":{\"properties\":{\"command\":{\"description\":\"Shell
+      command to execute\",\"title\":\"Command\",\"type\":\"string\"},\"timeout\":{\"default\":120.0,\"description\":\"Timeout
+      in seconds\",\"maximum\":600,\"minimum\":1,\"title\":\"Timeout\",\"type\":\"number\"},\"working_dir\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Working
+      directory for the command\",\"title\":\"Working Dir\"}},\"required\":[\"command\"],\"title\":\"BashInput\",\"type\":\"object\"}},{\"name\":\"Edit\",\"description\":\"\",\"input_schema\":{\"properties\":{\"file_path\":{\"description\":\"Absolute
+      path to the file to edit\",\"title\":\"File Path\",\"type\":\"string\"},\"old_string\":{\"description\":\"Exact
+      text to search for and replace\",\"title\":\"Old String\",\"type\":\"string\"},\"new_string\":{\"description\":\"Replacement
+      text\",\"title\":\"New String\",\"type\":\"string\"}},\"required\":[\"file_path\",\"old_string\",\"new_string\"],\"title\":\"FileEditInput\",\"type\":\"object\"}},{\"name\":\"Read\",\"description\":\"\",\"input_schema\":{\"properties\":{\"file_path\":{\"description\":\"Absolute
+      path to the file to read\",\"title\":\"File Path\",\"type\":\"string\"},\"offset\":{\"default\":0,\"description\":\"Line
+      offset to start reading from\",\"minimum\":0,\"title\":\"Offset\",\"type\":\"integer\"},\"limit\":{\"default\":2000,\"description\":\"Maximum
+      number of lines to read\",\"maximum\":10000,\"minimum\":1,\"title\":\"Limit\",\"type\":\"integer\"},\"max_bytes\":{\"default\":500000,\"description\":\"Maximum
+      bytes to read (safety cap)\",\"minimum\":1,\"title\":\"Max Bytes\",\"type\":\"integer\"}},\"required\":[\"file_path\"],\"title\":\"FileReadInput\",\"type\":\"object\"}},{\"name\":\"Write\",\"description\":\"\",\"input_schema\":{\"properties\":{\"file_path\":{\"description\":\"Absolute
+      path to the file to create or overwrite\",\"title\":\"File Path\",\"type\":\"string\"},\"content\":{\"description\":\"Content
+      to write to the file\",\"title\":\"Content\",\"type\":\"string\"}},\"required\":[\"file_path\",\"content\"],\"title\":\"FileWriteInput\",\"type\":\"object\"}},{\"name\":\"Glob\",\"description\":\"\",\"input_schema\":{\"properties\":{\"pattern\":{\"description\":\"Glob
+      pattern to match files (e.g. '**/*.py')\",\"title\":\"Pattern\",\"type\":\"string\"},\"path\":{\"default\":\".\",\"description\":\"Base
+      directory for glob search\",\"title\":\"Path\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"title\":\"GlobInput\",\"type\":\"object\"}},{\"name\":\"Grep\",\"description\":\"\",\"input_schema\":{\"properties\":{\"pattern\":{\"description\":\"Regular
+      expression pattern to search for\",\"title\":\"Pattern\",\"type\":\"string\"},\"path\":{\"default\":\".\",\"description\":\"File
+      or directory to search in\",\"title\":\"Path\",\"type\":\"string\"},\"glob\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Glob
+      pattern to filter files (e.g. '*.py')\",\"title\":\"Glob\"},\"output_mode\":{\"default\":\"files_with_matches\",\"description\":\"Output
+      mode\",\"enum\":[\"files_with_matches\",\"content\",\"count\"],\"title\":\"Output
+      Mode\",\"type\":\"string\"},\"head_limit\":{\"default\":100,\"description\":\"Maximum
+      number of output lines\",\"maximum\":1000,\"minimum\":1,\"title\":\"Head Limit\",\"type\":\"integer\"},\"offset\":{\"default\":0,\"description\":\"Skip
+      first N matches before applying head_limit\",\"minimum\":0,\"title\":\"Offset\",\"type\":\"integer\"},\"context_around\":{\"default\":0,\"description\":\"Context
+      lines around match (-C)\",\"maximum\":10,\"minimum\":0,\"title\":\"Context Around\",\"type\":\"integer\"},\"ignore_case\":{\"default\":false,\"description\":\"Case
+      insensitive search (-i)\",\"title\":\"Ignore Case\",\"type\":\"boolean\"},\"multiline\":{\"default\":false,\"description\":\"Enable
+      multiline mode (-U --multiline-dotall)\",\"title\":\"Multiline\",\"type\":\"boolean\"}},\"required\":[\"pattern\"],\"title\":\"GrepInput\",\"type\":\"object\"}},{\"name\":\"Skill\",\"description\":\"Tool
+      that lets the LLM execute named skills.\\n\\n    Skills are pre-loaded from
+      ``.agent/skills/`` directories (project\\n    and user level) and optionally
+      contributed by plugins.\",\"input_schema\":{\"description\":\"Validated input
+      for the ``Skill`` tool.\",\"properties\":{\"skill\":{\"description\":\"Skill
+      name, e.g. 'review-pr'.\",\"title\":\"Skill\",\"type\":\"string\"},\"arguments\":{\"additionalProperties\":{\"type\":\"string\"},\"description\":\"Key-value
+      pairs passed to the skill template.\",\"title\":\"Arguments\",\"type\":\"object\"},\"mode\":{\"anyOf\":[{\"enum\":[\"inline\",\"fork\"],\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Override
+      the skill's default execution mode.\",\"title\":\"Mode\"}},\"required\":[\"skill\"],\"title\":\"SkillInput\",\"type\":\"object\"}},{\"name\":\"Agent\",\"description\":\"Tool
+      that lets the LLM create sub-agents for complex multi-step tasks.\\n\\n    The
+      LLM provides ``description``, ``prompt``, and optionally a\\n    ``subagent_type``.
+      \ This tool resolves the agent definition, sets\\n    up the child execution
+      environment, and routes to either synchronous\\n    (inline) or asynchronous
+      (background) execution.\",\"input_schema\":{\"description\":\"Validated input
+      for the ``Agent`` tool.\",\"properties\":{\"description\":{\"description\":\"A
+      short (3-5 word) description of the task.\",\"title\":\"Description\",\"type\":\"string\"},\"prompt\":{\"description\":\"The
+      task for the agent to perform.\",\"title\":\"Prompt\",\"type\":\"string\"},\"subagent_type\":{\"default\":\"GeneralPurpose\",\"description\":\"Agent
+      type, e.g. 'Explore', 'Plan', 'GeneralPurpose'.\",\"title\":\"Subagent Type\",\"type\":\"string\"},\"model\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Optional
+      model override (alias: sonnet/opus/haiku).\",\"title\":\"Model\"},\"run_in_background\":{\"default\":false,\"description\":\"Run
+      in background and notify when done.\",\"title\":\"Run In Background\",\"type\":\"boolean\"}},\"required\":[\"description\",\"prompt\"],\"title\":\"AgentInput\",\"type\":\"object\"}}],\"stream\":true}"
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '8017'
+      Content-Type:
+      - application/json
+      Host:
+      - api.deepseek.com
+      User-Agent:
+      - AsyncAnthropic/Python 0.105.2
+      X-Stainless-Arch:
+      - other:amd64
+      X-Stainless-Async:
+      - async:asyncio
+      X-Stainless-Helper-Method:
+      - stream
+      X-Stainless-Lang:
+      - python
+      X-Stainless-OS:
+      - Windows
+      X-Stainless-Package-Version:
+      - 0.105.2
+      X-Stainless-Runtime:
+      - CPython
+      X-Stainless-Runtime-Version:
+      - 3.12.13
+      X-Stainless-Stream-Helper:
+      - messages
+      anthropic-version:
+      - '2023-06-01'
+      x-stainless-read-timeout:
+      - '600'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-timeout:
+      - NOT_GIVEN
+    method: POST
+    uri: https://api.deepseek.com/anthropic/v1/messages
+  response:
+    body:
+      string: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"d8f212cf-ece0-4ef0-9fb8-828b0df64cba\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-v4-flash\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":190,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":2304,\"output_tokens\":0,\"service_tier\":\"standard\"}}}\n\nevent:
+        content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\nevent:
+        ping\ndata: {\"type\":\"ping\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"The\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        file\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        just\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        contains\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        `\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"print\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"('\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hello\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"')\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"`.\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        Let\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        me\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        summarize\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        the\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"
+        findings\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\".\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"d8f212cf-ece0-4ef0-9fb8-828b0df64cba\"}}\n\nevent:
+        content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent:
+        content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"##\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        Result\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"\\n\\n\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Only\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        **\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"one\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"**\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        Python\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        file\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        was\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        found\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        in\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        that\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        directory\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\":\\n\\n\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"|\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        #\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        |\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        File\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        Path\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        |\\n\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"|---\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"|\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"-----------\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"|\\n\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"|\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        \"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"1\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        |\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        `\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"src\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"/main\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\".py\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"`\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        |\\n\\n\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"###\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        What\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        it\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        does\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"\\n\\n\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"The\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        file\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        `\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"src\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"/main\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\".py\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"`\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        is\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        extremely\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        simple\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        \u2014\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        it\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        contains\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        a\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        single\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        line\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        of\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        code\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\":\\n\\n\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"```\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"python\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"\\n\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"print\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"('\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"')\\n\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"```\\n\\n\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"It\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        just\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        prints\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        the\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        string\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        `\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"`\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        to\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        standard\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        output\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\".\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        This\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        is\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        likely\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        a\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        minimal\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        test\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        fixture\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        used\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        by\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        a\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        `\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"p\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"ytest\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"`\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        test\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        to\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        verify\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        that\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        the\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        test\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        harness\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        can\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        execute\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        a\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        basic\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        Python\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        script\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        and\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        capture\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        its\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        output\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        (\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"i\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\".e\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\".,\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        checking\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        that\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        a\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        multi\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"\u2011\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"turn\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        agent\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        run\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        produces\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        `\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"\\\"\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"`\"}}\n\nevent:
+        content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        on\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"
+        stdout\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\").\"}}\n\nevent:
+        content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent:
+        message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":190,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":2304,\"output_tokens\":148,\"service_tier\":\"standard\"}}\n\nevent:
+        message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    headers:
+      Connection:
+      - keep-alive
+      Content-Type:
+      - text/event-stream; charset=utf-8
+      Date:
+      - Thu, 25 Jun 2026 15:10:55 GMT
+      Server:
+      - elb
+      Strict-Transport-Security:
+      - max-age=31536000; includeSubDomains; preload
+      Transfer-Encoding:
+      - chunked
+      Via:
+      - 1.1 e3b94faafefd6a1b1f91ac6de26496d2.cloudfront.net (CloudFront)
+      X-Amz-Cf-Id:
+      - 7zvjVC1Q7OK8tYRVNouBc70aW-Teeypny659Ff3kPWsbCzgcNueaFA==
+      X-Amz-Cf-Pop:
+      - NRT20-P6
+      X-Cache:
+      - Miss from cloudfront
+      X-Content-Type-Options:
+      - nosniff
+      access-control-allow-credentials:
+      - 'true'
+      cache-control:
+      - no-cache
+      vary:
+      - origin, access-control-request-method, access-control-request-headers
+      x-ds-trace-id:
+      - 2e39cb8e9bb05ae29dc92e28a53c6cf4
+    status:
+      code: 200
+      message: OK
+version: 1

@@ -215,6 +215,7 @@ Commands:
   /clear                   Clear conversation history (keeps session permissions)
   /skills                  List loaded skills
   /sessions                List saved sessions (--resume <id> to restore)
+  /logs                    Show conversation-log metrics for this session
   /help                    Show this help
   /quit                    Exit"""
 
@@ -272,6 +273,44 @@ async def _list_sessions_cmd(config: AgentConfig) -> None:
         print(
             f"  {sid_short}...  {s.last_activity[:19]}  "
             f"({s.message_count} msgs)  {s.title}{marker}"
+        )
+
+
+async def _show_logs_cmd(config: AgentConfig, session_id: str) -> None:
+    """Print conversation-log metrics for the current session (Item 12)."""
+    if not config.logging.enabled:
+        print("(conversation logging is disabled — set logging.enabled=True)")
+        return
+
+    from .logging.path import compute_project_hash, log_file_path
+    from .logging.reader import aggregate_metrics, load_log
+
+    ph = compute_project_hash(config.workspace_root)
+    path = log_file_path(
+        ph,
+        session_id,
+        rolling=config.logging.rolling,
+        log_dir=config.logging.log_dir,
+        trace_id=session_id,
+    )
+    records = await load_log(path)
+    if not records:
+        print(f"(no log records yet at {path})")
+        return
+
+    agg = aggregate_metrics(records)
+    print(f"  log file       : {path}")
+    print(f"  traces / turns : {agg['sessions']} / {agg['turns']}")
+    print(
+        f"  tokens         : {agg['total_tokens']} "
+        f"(in {agg['input_tokens']} / out {agg['output_tokens']})"
+    )
+    print(f"  tool uses      : {agg['tool_uses']}  {agg['tool_frequency']}")
+    print(f"  errors         : {agg['errors']}  (rate {agg['error_rate']:.2f})")
+    if agg["latency_ms_avg"] is not None:
+        print(
+            f"  latency ms     : avg {agg['latency_ms_avg']:.0f}  "
+            f"p50 {agg['latency_ms_p50']:.0f}  p95 {agg['latency_ms_p95']:.0f}"
         )
 
 
@@ -405,6 +444,9 @@ async def _repl(
                 if cmd_parts[0].lower() == "/sessions":
                     await _list_sessions_cmd(config)
                     continue
+                if cmd_parts[0].lower() == "/logs":
+                    await _show_logs_cmd(config, session.session_id)
+                    continue
                 if _handle_command(config, prompt):
                     break
                 continue
@@ -440,6 +482,9 @@ async def _repl(
                 # loop was abandoned via exception — never at asyncio.run() shutdown
                 # in a different task (anyio cancel-scope requirement).
                 await stream.aclose()
+                # §Item 12: drain this prompt's conversation-log sink (no-op
+                # when logging is disabled).
+                await agent.aclose()
     finally:
         await session.end_persistence()
 

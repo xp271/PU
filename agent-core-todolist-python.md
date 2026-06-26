@@ -2,12 +2,14 @@
 
 > 目标：纯 Python 库， `Agent(config).run(prompt)` 即可调用，不绑定任何 UI/CLI。
 > 每个条目含具体开发事项和预估工时。
+>
+> **当前进度（~95%）**：Phase 1–4 核心全部落地——脚手架/Tool 框架、多 Provider LLM、Agent 主循环、工具管线+权限、自动压缩、MCP、Agent 定义、子 Agent 执行引擎、Hooks/Skills/Plugins、会话持久化（Item 10 Phase A+B）。全套 ~957 passed。仅余 #11 收尾：vcrpy 录制回放、MkDocs 文档、PyPI 发布。
 
 ---
 
 ## Phase 1: 基础设施 —— 已实现
 
-> 以下为已实现的公开 API 与 Tool 框架的完整接口文档。剩余未实现部分（LLM 集成层）见后续 TODO 条目。
+> 以下为已实现的公开 API 与 Tool 框架的完整接口文档（本文档同时作为 as-built 接口参考）。
 
 ---
 
@@ -2106,7 +2108,7 @@ from agent_core.mcp import (
 
 ---
 
-## Phase 3: 子Agent & 扩展 (Week 5-6) — #7 已实现, #8 已实现, #9 待实现
+## Phase 3: 子Agent & 扩展 (Week 5-6) — #7 已实现, #8 已实现, #9 已实现
 
 ---
 
@@ -2877,64 +2879,230 @@ from agent_core import (
 
 ---
 
-## Phase 4: 持久化 & 收尾 (Week 7)
+## Phase 4: 持久化 & 收尾 (Week 7) — #10 已实现, #11 部分实现
 
-### 10. 会话持久化 & 恢复 (2 天)
+### 10. 会话持久化 & 恢复 — ✅ 已实现
 
-**功能**: JSONL 转录存储（主会话 + 子 Agent sidechain），会话列表与恢复，格式迁移。
+**功能**: append-only JSONL 转录存储（主会话 + 子 Agent sidechain），会话列表 / 加载（恢复）/ 删除 / 清理，格式迁移；in-loop 压缩以 checkpoint 分段链落盘，**保留压缩前完整 transcript**。
 
-**原因**: 对话需要跨进程存活。JSONL 是 append-only 格式，安全简单，崩溃时最多丢失最后一行。
+**原因**: 对话需跨进程存活。JSONL append-only，崩溃时最多丢最后一行；压缩不重写历史，便于审计与回溯。
 
-> **详细设计**: 见 [plan/session-state-and-history-plan.md](./plan/session-state-and-history-plan.md) §3（Phase B）。本条目 = 该计划的 **Phase B**（落盘 + 恢复）。
+> **as-built 设计**: 见 [plan/item-10-session-persistence-plan.md](./plan/item-10-session-persistence-plan.md)（含 §0′ 评审修订记录）。**Phase A（会话运行时层 `SessionState`）** 是前置，见 §10.6。
 
-> **前置依赖（Phase A，必须先做）**: 同计划 §2 的**会话运行时层 `SessionState`**（内存中跨 prompt 的对话历史延续）。当前 REPL 每个 prompt 独立、历史不延续（`run_query` 累积 `messages` 但 `DoneMessage` 不回吐、`cli._repl` 不传 `initial_messages`）。Phase B 的落盘以 `SessionState.messages` 为唯一事实源——没有它，落盘无源可写。`SessionState` 同时持有会话权限记忆（见 [plan/permission-session-scope-plan.md](./plan/permission-session-scope-plan.md)），三者建议合并实施。
+**实现文件**:
 
-**Phase A — 会话运行时层（前置）** — ✅ 已实现
-- [x] `src/agent_core/session/state.py`：`SessionState`（`session_id` / `messages` / `permission_store` / `transcript_path`）
-- [x] `DoneMessage` 增 `final_messages` 字段；`run_query` 各 `yield DoneMessage` 回吐轮末 `messages`
-- [x] `Agent(config, session=None)`；`stream` 注入 `initial_messages` + 回写 `session.messages`
-- [x] `cli._repl` 循环外创建 `SessionState` 并注入每个 Agent；`/clear` 清空历史
-- [x] 会话权限记忆（`SessionPermissionStore`）挂载于 `SessionState.permission_store`，注入链贯通
-- [~] `run.py` 父历史来源：当前子 Agent 仍由 `parent_context.messages` 提供（语义不变），未额外改动
+| 文件 | 职责 |
+|------|------|
+| `src/agent_core/persistence/path.py` | 存储路径纯函数 + 常量（`AGENT_HOME`/`PROJECTS_DIR`/`CURRENT_VERSION`） |
+| `src/agent_core/persistence/storage.py` | `TranscriptEntry` / `CompactionRecord` 模型 + `SessionTranscriptWriter` + `load_entries`/`save_entries` |
+| `src/agent_core/persistence/recovery.py` | LIVE 分段链恢复 + FULL 审计 + 清洗（tool_use/thinking/中断检测）+ `clean_and_rebuild` |
+| `src/agent_core/persistence/session.py` | 会话 CRUD：`SessionInfo` + `list/load/delete_session` + `cleanup_old_sessions` |
+| `src/agent_core/persistence/migrate.py` | 格式迁移 `migrate_transcript`（v0→v1）+ `needs_migration` |
+| `src/agent_core/session/state.py` | `SessionState` 持久化生命周期（`begin/end_persistence`/`flush_new_messages`/压缩检测） |
+| `src/agent_core/agents/run.py` | sidechain 写入升级为 `TranscriptEntry` 信封（传 `session_id`/`project_hash` 时） |
+| `src/agent_core/agents/fork.py` | `_load_sidechain_messages` unwrap `.message`（兼容新信封 + 旧裸格式） |
+| `src/agent_core/cli.py` | `--resume`/`--continue` 解析 + `/sessions` 命令 + `begin/end_persistence` 接线 |
 
-**Phase B — 落盘 & 恢复（本条目主体）**
-- [ ] 存储路径：`~/.agent/projects/{project_hash}/{session_id}.jsonl`
-- [ ] Sidechain 路径：`~/.agent/projects/{project_hash}/{session_id}/{agent_id}.jsonl`（复用现有 `run.py` sidechain）
-- [ ] 写入策略：每条 message 产生时 `aiofiles` append 一行；writer 挂在 `SessionState` 单一写入口
-- [ ] 消息序列化格式（同构 cc-haha）：每行 `{"uuid", "parentUuid", "sessionId", "timestamp", "isSidechain", "message": {role, content}}`；`parentUuid` 串成链（v1 线性，预留 fork/branch）
-- [ ] 会话列表：扫描存储目录 → 按 mtime 排序 → 提取首条 user message 作为标题
-- [ ] 会话恢复：读 JSONL → 按 `parentUuid` chain-walk 到 leaf → **清洗**（`filter_unresolved_tool_uses` 丢弃未配对 tool_use、`filter_orphaned_thinking`、`detect_turn_interruption` 检测 mid-turn 中断并可注入 "Continue…"）→ 反序列化 → 塞入新 `SessionState.messages` → 重建 `ToolUseContext`（read_file_state 失效标记）→ `query()` 继续
-- [ ] 格式迁移：`migrate_transcript()` 函数，version 字段驱动，旧格式自动升级
-- [ ] 会话删除 / 清理：删除对应 JSONL 文件，清理 sidechain 子目录
-- [ ] CLI：`--resume <id>` / `--continue`（最近会话）/ `/sessions`（列表）
+**测试文件**:
+
+| 文件 | 说明 |
+|------|------|
+| `tests/unit/test_persistence_path.py` | 路径计算 / hash 确定性 / 排序过滤 |
+| `tests/unit/test_persistence_storage.py` | TranscriptEntry/CompactionRecord 模型 / writer / checkpoint / crash 守卫 / reopen 链恢复 |
+| `tests/unit/test_persistence_recovery.py` | walk_chain / orphaned thinking / 中断检测 / LIVE 分段链 / FULL 审计 / clean_and_rebuild |
+| `tests/unit/test_persistence_session.py` | list/load/delete/cleanup + 边界（损坏/空/不存在/v0 迁移/压缩 resume） |
+| `tests/unit/test_persistence_migrate.py` | v0→v1 升级 / 幂等 / 空文件 / 部分 v1 |
+| `tests/unit/test_session_state.py` | begin/end/flush 生命周期 / resume 不重复落盘 / 压缩检测 / 链续接 |
+| `tests/integration/test_persistence_flow.py` | 端到端落盘+恢复+续接+压缩边界 checkpoint |
+| `tests/integration/test_persistence_sidechain.py` | Phase B 信封格式 / parentUuid 链 / unwrap 往返 |
+
+**存储布局**:
+
+```
+~/.agent/projects/{project_hash}/{session_id}.jsonl              # 主会话
+~/.agent/projects/{project_hash}/{session_id}/{agent_id}.jsonl   # 子 Agent sidechain
+```
+
+每行一个 `TranscriptEntry`（JSON）；`parentUuid` 串成线性链（跨 resume 续接），`type="compaction"` 行标记压缩边界。
+
+#### 10.1 存储路径 (`persistence/path.py`)
+
+纯函数，无副作用。常量 `AGENT_HOME = ~/.agent`、`PROJECTS_DIR = "projects"`、`CURRENT_VERSION = 1`。
+
+| 函数 | 签名 → 返回 | 说明 |
+|------|-----------|------|
+| `compute_project_hash` | `(workspace_root: str \| None = None) -> str` | 绝对路径 SHA-256 前 16 hex；`None` → `os.getcwd()` |
+| `project_dir` | `(project_hash) -> str` | `~/.agent/projects/{hash}/` |
+| `session_jsonl_path` | `(project_hash, session_id) -> str` | 主会话 JSONL 路径 |
+| `sidechain_dir` | `(project_hash, session_id) -> str` | sidechain 子目录 |
+| `sidechain_jsonl_path` | `(project_hash, session_id, agent_id) -> str` | sidechain JSONL 路径 |
+| `list_session_files` | `(project_hash) -> list[str]` | `{session_id}` 列表，按 mtime 降序；目录不存在 → `[]` |
+
+#### 10.2 数据模型 & 写入器 (`persistence/storage.py`)
+
+```python
+class CompactionRecord(BaseModel):
+    segment_index: int                       # 第几次压缩 (1-based)
+    snapshot: list[dict[str, Any]]           # 压缩后完整 live 列表 (= summary + 保留尾部)，自包含
+    summary_count: int                       # snapshot 中属于摘要的条数
+    kept_count: int                          # snapshot 尾部原样保留的条数
+    summarized_uuid_first: str | None = None # 审计回链区间 (v1 留空)
+    summarized_uuid_last: str | None = None
+    summarized_count: int = 0
+    prev_checkpoint_uuid: str | None = None  # 上一 checkpoint uuid (segment 链)
+    trigger: str = "token_threshold"
+    tokens_before: int | None = None
+    tokens_after: int | None = None
+
+class TranscriptEntry(BaseModel):
+    uuid: str
+    parentUuid: str | None = None
+    sessionId: str
+    timestamp: str                           # ISO 8601 UTC
+    isSidechain: bool = False
+    version: int = 1
+    type: Literal["message", "compaction"] = "message"
+    message: dict[str, Any] | None = None    # type="message" 时
+    compaction: CompactionRecord | None = None  # type="compaction" 时
+
+    @classmethod
+    def from_message(cls, message, session_id, parent_uuid=None, is_sidechain=False) -> "TranscriptEntry"
+    @classmethod
+    def from_checkpoint(cls, record, session_id, parent_uuid=None) -> "TranscriptEntry"
+```
+
+**`SessionTranscriptWriter`** — append-only，每个 `SessionState` 最多一个：
+
+| 方法 / 属性 | 说明 |
+|------|------|
+| `await open()` | 打开 'a' 句柄；**crash 守卫**：末字节非 `\n` 时先补一个换行隔离半行；**reopen 链恢复**：从已有 entries 回种 `last_uuid`/`last_checkpoint_uuid`/`entry_count` |
+| `await write_entry(message, *, is_sidechain=False) -> str` | append 一条 `type="message"`，`parentUuid` = 上次 uuid，返回新 uuid |
+| `await write_checkpoint(record) -> str` | append 一条 `type="compaction"`，**绝不重写旧内容**；填 `record.prev_checkpoint_uuid` |
+| `await flush()` / `await close()` | flush / 幂等关闭 |
+| `is_open` / `entry_count` / `last_uuid` / `last_checkpoint_uuid` | 状态属性 |
+
+**文件级辅助**: `await load_entries(path) -> list[TranscriptEntry]`（坏行跳过 + debug 日志，文件不存在 → `[]`）；`await save_entries(path, entries)`（tempfile + `os.replace` 原子覆写，用于迁移）。
+
+#### 10.3 恢复 & 清洗 (`persistence/recovery.py`)
+
+| 函数 | 签名 → 返回 | 说明 |
+|------|-----------|------|
+| `reconstruct_live_messages` | `(entries) -> list[dict]` | **LIVE 分段链**：单遍扫描，遇 checkpoint 即 `base = snapshot; tail = []`，返回 `base + tail`；过滤 sidechain；无 checkpoint → 顺序拼接 |
+| `reconstruct_full_history` | `(entries) -> list[HistorySegment]` | **FULL 审计**：按 checkpoint 切段，保留全部原始消息 |
+| `walk_entry_chain` | `(entries) -> list[TranscriptEntry]` | 沿 `parentUuid` root→leaf（审计 / 未来 fork） |
+| `filter_unresolved_tool_uses` | `(messages) -> list[dict]` | 委托 `fork.filter_incomplete_tool_calls`，丢未配对 tool_use |
+| `filter_orphaned_thinking` | `(messages) -> list[dict]` | 仅删「纯孤立 thinking」assistant 消息；**含 tool_use / 非空 text 的不删** |
+| `detect_turn_interruption` | `(messages) -> TurnInterruption` | 检测 mid-turn 中断（末条 user prompt / 悬空 tool_use） |
+| `await reconstruct_messages` | `(entries) -> (list[dict], TurnInterruption \| None)` | LIVE + 清洗包装 |
+| `await clean_and_rebuild` | `(entries, *, include_sidechain=False, want_full=False) -> RecoveryResult` | 一站式：LIVE 恢复 + 清洗 + 计数 + 可选 FULL |
+
+```python
+@dataclass
+class HistorySegment:        # index, messages, compaction (末段为 None)
+@dataclass
+class TurnInterruption:      # interrupted, last_user_message, pending_tool_uses, detail
+@dataclass
+class RecoveryResult:        # messages, interruption, entries_loaded/kept, tool_uses_removed,
+                            # warnings, compaction_count, written_count, full_segments
+```
+
+> `written_count` = **清洗前** LIVE 长度（= 磁盘水位），供 `load_session` 预置 `SessionState._written_count`，确保 `begin_persistence` 不重复 append。
+
+#### 10.4 会话 CRUD (`persistence/session.py`)
+
+```python
+@dataclass
+class SessionInfo:
+    session_id: str; title: str; created_at: str; last_activity: str
+    message_count: int; project_hash: str; has_unfinished_turn: bool = False
+```
+
+| 函数 | 说明 |
+|------|------|
+| `await list_sessions(workspace_root=None) -> list[SessionInfo]` | 扫描项目目录，按 `last_activity` 降序；首行→标题/created_at，末行→last_activity + 中断标记 |
+| `await load_session(session_id, *, workspace_root=None, project_hash=None) -> SessionState \| None` | `migrate_transcript` → `load_entries` → `clean_and_rebuild` → 构造 `SessionState` 并预置 `_written_count`/`_compaction_count`/`transcript_path`；不存在/空/全损坏 → `None` |
+| `await delete_session(session_id, ...) -> bool` | 删 JSONL + `rmtree` sidechain 子目录 |
+| `await cleanup_old_sessions(workspace_root=None, *, max_age_days=30, dry_run=False) -> list[str]` | 删除超龄会话，返回被删 id |
+
+#### 10.5 格式迁移 (`persistence/migrate.py`)
+
+`CURRENT_VERSION = 1`。`await migrate_transcript(path) -> bool`（发生迁移返回 `True`；tempfile + `os.replace` 原子，失败不损原文件）；`needs_migration(raw_entries) -> bool`。**v0→v1**：首行无 `uuid` → 判定 v0，将裸 `{role, content}` 包成 `TranscriptEntry` 信封（线性 `parentUuid` 链）。由 `load_session` 在读取前调用。
+
+#### 10.6 SessionState 持久化生命周期 (`session/state.py`)
+
+Phase A 字段：`session_id` / `messages` / `permission_store` / `transcript_path`；Phase B 新增（`repr=False`）：`_writer` / `_written_count` / `_compaction_count`。
+
+| 方法 | 说明 |
+|------|------|
+| `await begin_persistence(path)` | 建 `SessionTranscriptWriter` 并 `open()`；仅 append `messages[_written_count:]`（resume 时水位已预置 → 不重复落盘） |
+| `await end_persistence()` | flush + close writer，幂等 |
+| `await flush_new_messages(final_messages)` | `None` → no-op；`_is_compaction` → `write_checkpoint`，否则增量 append `final_messages[_written_count:]`；末尾对齐 `self.messages` |
+| `_is_compaction(final_messages) -> bool` | 已落盘前缀是否仍是 `final_messages` 前缀（缩短/改写 → 压缩） |
+| `_build_compaction_record(final_messages) -> CompactionRecord` | 由最长公共尾部推 `kept_count`，`snapshot = final_messages`，`segment_index` 跨 resume 递增 |
+
+#### 10.7 集成点
+
+| 文件 | 接线 |
+|------|------|
+| `agent.py` | `Agent.stream` 消费到 `done` → `await session.flush_new_messages(final_messages)` 再 `record_turn_result`；传 `session_id`/`project_hash` 给 `query()` |
+| `query/loop.py` | `query()` 新增 `session_id`/`project_hash`，注入 `ToolUseContext` |
+| `tools/base.py` | `ToolUseContext` 新增 `session_id` / `project_hash` |
+| `agents/tool.py` | `AgentTool._run_sync`/`_run_async` 透传 `context.session_id`/`project_hash` → `run_agent` |
+| `agents/run.py` | `session_id`+`project_hash` 均非空时，sidechain 用新路径 + `TranscriptEntry` 信封 |
+| `agents/fork.py` | `_load_sidechain_messages` 取 `record["message"]`（兼容旧裸格式），供 `resume_agent` |
+| `cli.py` | `--resume <id>` / `--continue` / `/sessions`；`_repl` 用 `try/finally` 保证 `end_persistence()` |
+
+#### 10.8 不变量 & 设计要点
+
+1. **写入原子性**：每行写后立即 flush，crash 最多丢最后一行；`open()` 补尾换行守卫
+2. **压缩 append-only**：压缩**不**重写/截断 JSONL，只 append checkpoint；压缩前原始 entries 永久保留 → FULL 审计可还原；LIVE = 最后 checkpoint 的 snapshot + 其后追加
+3. **读写水位对齐**：磁盘当前段消息数 == `_written_count` == LIVE 清洗前长度；resume 时 `load_session` 预置，`begin_persistence` 只写水位之后
+4. **链续接**：`parentUuid` 严格线性，writer reopen 时从磁盘回种 `last_uuid`/`last_checkpoint_uuid`，跨 resume 不断链
+5. **sidechain 兼容**：旧裸格式可被 `migrate_transcript` 升级；`_load_sidechain_messages` 同时兼容信封与裸格式
+6. **权限记忆不落盘**（v1）：resume 后 `SessionPermissionStore` 为空，需重新授权
+
+**遗留（v2）**: 会话级权限记忆落盘恢复；`CompactionRecord.summarized_uuid_first/last` 审计回链映射（需 writer 维护 per-entry uuid 索引）；lean checkpoint（不复制保留尾部以省空间）；fork/branch 非线性 `parentUuid`。
 
 ---
 
-### 11. 测试、文档 & 发布 (2 天) — 部分实现
+### 11. 测试、文档 (2 天) — 部分实现
 
-**功能**: 多层测试（单元 + mock 集成 + vcrpy 录制回放），MkDocs API 文档，PyPI 发布配置。
+**功能**: 多层测试（单元 + mock 集成 + vcrpy 录制回放），MkDocs API 文档。
 
 **原因**: 可被第三方依赖的库需要可信的测试覆盖。vcrpy 覆盖 LLM 调用确定性场景，mock model 覆盖并发/竞态/隔离逻辑，两者互补。
 
-- [x] **单元测试**（pytest） — 现有 ~755 个单元测试（48 个测试文件），覆盖：
-  - 每个 Tool 的 validate_input / call / 边界条件
-  - AgentConfig / ModelId / AgentMessage 模型校验
-  - AgentDefinition / AgentRegistry / 加载器 / 内置 Agent
+- [x] **单元测试**（pytest） — 全套 ~957 passed / 10 skipped，覆盖：
+  - 每个 Tool 的 validate_input / call / 边界条件（含 device 文件、stat/write 失败、stale 指纹、workspace 越界、50KB 持久化）
+  - AgentConfig / ModelId / AgentMessage 模型校验；Agent.run 错误聚合
+  - AgentDefinition / AgentRegistry / 加载器（含非法字段→None）/ 内置 Agent
   - PermissionEngine（7 步链）/ SessionPermissionStore / 权限继承 / Bash AST
-  - TokenBudget / hard_truncate / enrich_context
-  - Anthropic / OpenAI / DeepSeek provider 客户端
+  - TokenBudget / hard_truncate / enrich_context（git 超时/缺失/非 repo）
+  - Anthropic / OpenAI / DeepSeek provider：classify_error 全状态码 + **重试循环**（retry→成功 / 耗尽→Error / fatal→不重试，`test_provider_retry.py`）
   - 压缩触发 / 提示词 / 一致性验证
-  - Agent 生命周期 / Fork / resolve / AgentTool
-  - SessionState
-  - Hooks（36 个：类型模型 / 注册表 / pipeline / 短路语义）
-  - Plugins（18 个：基类 / 注册+enable+disable / 注入 / 错误边界）
-  - Skills（24 个：定义模型 / registry / loader / 模板渲染 / 权限）
-- [x] **mock model 集成测试**（已实现 `MockModel` + `tests/integration/`）：`test_query_loop.py`（单轮/多轮/max_turns/error）、`test_tool_pipeline.py`（并发/串行）、`test_compression.py`（query loop 压缩路径）
+  - Agent 生命周期（含 `run_async_lifecycle` 失败路径）/ Fork / resolve / AgentTool
+  - SessionState（持久化生命周期 / 压缩检测 / resume 不重复落盘）
+  - Hooks（含 4 类 hook 异常 fallback：pre→block / post→error / stop→continue / subagent→block）
+  - Plugins（含 `safe_enable_plugins` / `safe_disable_all` 错误隔离）
+  - Skills（定义模型 / registry / loader / 模板渲染 / 权限）
+  - **持久化（Item 10）**：path / storage（writer + checkpoint + crash 守卫）/ recovery（LIVE 分段链 + FULL 审计 + 清洗）/ session（list/load/delete/cleanup）/ migrate（v0→v1）
+- [x] **mock model 集成测试**（`MockClient` + `tests/integration/`）：`test_query_loop.py`（单轮/多轮/max_turns/error/**流式异常**）、`test_run_agent.py`（子 Agent 全流程 + sidechain + 异步 drain）、`test_compression.py`（query loop 压缩路径）、`test_persistence_flow.py`（落盘+恢复+压缩边界）、`test_persistence_sidechain.py`、`test_history_continuity.py`、`test_hooks.py` / `test_skills.py` / `test_plugins.py` / `test_mcp*.py`
 - [ ] **vcrpy 录制回放测试** — 桩已创建（`tests/e2e/test_turn_flow.py` / `test_compression.py`），未录制
-- [ ] **Mock 集成测试补齐**: `test_subagent.py` / `test_fork.py` / `test_permission_inheritance.py` 占位桩
+  详细实施计划见 `plan/item-11-test-docs-release-plan.md`（已对照代码库审查修订）。落地前**必读约束**：
+  - ⚠ **先做 vcrpy SSE 可行性 spike**：Agent 走 httpx 异步 SSE，vcrpy 对此支持不稳定；录 1 条流式回放成功再铺开，失败则退化为 MockTransport 或 MockModel 冒烟。
+  - ⚠ **每个 `async def test_*` 必须显式加 `@pytest.mark.asyncio`**：项目无 `asyncio_mode=auto`，漏标会"假通过"（仅 `coroutine never awaited` 警告，断言不执行）。
+  - **不要用 `@pytest.mark.vcr`**（属 pytest-recording，项目未装）；用手写 `vcr` fixture，缺失 cassette 时 skip。
+  - `test_permission_denied` 必须用**破坏性工具(Write)**，且断言**消息流里的 `is_error` ToolResult**——只读工具会自动放行，且权限拒绝**不**改 `stop_reason`（仍 `end_turn`）。
+  - `test_compression_*` 压缩是否触发依赖真实 token，统一**软断言**；唯 `test_compression_disabled` 可硬断言。
+- [~] **占位/skip 桩清理**：`test_tool_pipeline.py` / `test_subagent.py` / `test_fork.py` / `test_permission_inheritance.py` 仍为 `pytest.skip`（覆盖面已由 `test_loop_helpers.py` + `test_tools_edge_cases.py` + `test_run_agent.py` + `test_agent_fork.py` + `test_permissions.py` 承接，可删占位）
 - [ ] MkDocs Material API 文档搭建
-- [ ] `pyproject.toml` + GitHub Actions PyPI 发布 workflow
-- [ ] README 包含快速开始示例
+  - ⚠ `mkdocs.yml` 必须放**仓库根**（不是 `docs/`，否则 `docs_dir` 错位、`paths:[src]` 失效，build 失败）。
+  - ⚠ 需**新增 `docs` 依赖组**（mkdocs / mkdocs-material / mkdocstrings[python]）——当前 pyproject 未声明，否则 build 找不到模块。
+- [x] **`pyproject.toml`** — 已完成（依赖/scripts/build-system/pytest 配置齐全）；待补：dev 组加 `mypy`（CI 需要）、新增 `docs` 依赖组
+- [x] README 包含快速开始示例 + 子 Agent / Skills / Hooks / 会话持久化用法
+- [ ] **GitHub Actions CI/CD**（`.github/workflows/ci.yml`）— pytest + mypy + ruff；e2e 步骤须在 cassette 提交后再启用，否则全 skip 隐性失效
+- [ ] **examples 补齐** — `basic_run` / `streaming` / `permission_callback` / `session_resume`；其中 `session_resume` 须用真实 API（`SessionState` + `persistence.session.load_session`，`AgentResult` 无 `session_id`）
+
+> **代码库事实备忘（审查 2026-06-25 得出，实施时复用）**：① 无 `asyncio_mode=auto`，异步测试一律显式标记；② session 持久化/恢复走 `agent_core.session.SessionState` + `agent_core.persistence.session.{list_sessions,load_session}`（内部模块，非顶层导出）；③ `StopReason` ∈ {end_turn, max_turns, permission_denied, error}，但本地权限拒绝**不**产生 `permission_denied`（来自 provider 级归一化），拒绝表现为 `is_error=True` 的 ToolResult；④ `CompactMessage` 有 `status/rounds_compressed/compression_ratio` 等字段，`status` ∈ {started, completed, skipped}。
 
 ---
 
@@ -2949,9 +3117,9 @@ from agent_core import (
 | Phase 3: 执行引擎 | #8 执行引擎+AgentTool+生命周期+Fork (5) | 5 | ✅ 已完成 |
 | Phase 3: 扩展 | #9 Hooks/Plugin/Skills (5–7) | 5–7 | ✅ 已完成 |
 | Phase 4: 持久化 | #10 会话运行时层 Phase A (1.5) | 1.5 | ✅ 已完成 |
-| Phase 4: 持久化 | #10 落盘+恢复 Phase B (2) | 2 | ⬜ 待实现 |
-| Phase 4: 收尾 | #11 测试补齐+文档+发布 (2) | 2 | 🔶 部分完成（测试 ~80%，文档/发布 0%） |
-| **总计** | **13 条目** | **37.5–39.5 天 (~8 周)** | 已完成 ~78% |
+| Phase 4: 持久化 | #10 落盘+恢复 Phase B (2) | 2 | ✅ 已完成 |
+| Phase 4: 收尾 | #11 测试补齐+文档+发布 (2) | 2 | 🔶 部分完成（单元/mock 集成 ✅ ~957 passed；e2e 录制/文档/CI/examples/发布待做，计划见 `plan/item-11-*`） |
+| **总计** | **13 条目** | **37.5–39.5 天 (~8 周)** | 已完成 ~95%（仅余 vcrpy e2e 录制、MkDocs 文档、CI/CD、examples、PyPI 发布） |
 
 ---
 
@@ -2974,11 +3142,18 @@ dependencies = [
     "tree-sitter-bash>=0.23",    # bash 语法包
 ]
 
-[project.optional-dependencies]
+# 实际用 PEP 735 dependency-groups（非 optional-dependencies）
+[dependency-groups]
 dev = [
-    "pytest>=8",
-    "pytest-asyncio>=0.25",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
     "vcrpy>=7",
+    "mypy>=1.13",          # 待补：CI 类型检查需要
+]
+docs = [                   # 待新增：MkDocs 文档构建
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
 ]
 ```
 
@@ -3049,9 +3224,17 @@ agent-core/
 │       │   ├── registry.py         # HookRegistry (显式 hook_kind 分类 + 优先级桶 + copy_with_overrides)
 │       │   └── pipeline.py         # run_pre_tool_use_hooks / run_post_tool_use_hooks / run_stop_hooks / run_subagent_start_hooks
 │       │
-│       ├── session/                # 🔶 会话运行时层 (Phase A 已完成, Phase B 待实现)
+│       ├── session/                # ✅ 会话运行时层 (Phase A)
 │       │   ├── __init__.py
-│       │   └── state.py            # SessionState (会话历史 + 权限记忆延续)
+│       │   └── state.py            # SessionState (会话历史 + 权限记忆延续 + 落盘生命周期)
+│       │
+│       ├── persistence/            # ✅ 会话持久化 & 恢复 (Item 10 Phase B)
+│       │   ├── __init__.py         # 公开导出: TranscriptEntry/CompactionRecord/SessionTranscriptWriter, list/load/delete_session, clean_and_rebuild, migrate_transcript
+│       │   ├── path.py             # 存储路径计算 (project_hash / session/sidechain jsonl 路径)
+│       │   ├── storage.py          # TranscriptEntry + CompactionRecord + append-only writer + load/save_entries
+│       │   ├── recovery.py         # LIVE 分段链恢复 + FULL 审计 + 清洗 (tool_use/thinking/中断检测)
+│       │   ├── session.py          # 会话 CRUD: list/load/delete/cleanup + SessionInfo
+│       │   └── migrate.py          # 格式迁移 v0→v1
 │       │
 │       ├── mcp/                    # MCP 协议集成
 │       │   ├── __init__.py         # 公开导出: McpSessionManager, register_mcp_tools

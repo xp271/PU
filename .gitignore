@@ -14,3 +14,6 @@ agent-core.config.json
 
 # Playwright MCP runtime output (console logs + page snapshots)
 .playwright-mcp/
+
+# MkDocs build output
+site/

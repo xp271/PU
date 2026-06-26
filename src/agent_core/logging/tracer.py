@@ -125,10 +125,14 @@ class TurnTracer:
     One ``INFO``-level log record is emitted per turn when the stream ends.
     """
 
-    __slots__ = ("_trace_id",)
+    __slots__ = ("_trace_id", "_recorder")
 
-    def __init__(self, trace_id: str) -> None:
+    def __init__(self, trace_id: str, recorder: Any = None) -> None:
         self._trace_id = trace_id
+        # Optional ``ConversationRecorder`` for the data/observability log
+        # layer (Item 12).  When None, only the standard logging record is
+        # emitted — behaviour identical to before.
+        self._recorder = recorder
 
     async def wrap(
         self,
@@ -141,4 +145,12 @@ class TurnTracer:
                 yield event
         finally:
             turn.finalize()
-            _logger.info("turn_complete", extra=turn.to_dict())
+            payload = turn.to_dict()
+            _logger.info("turn_complete", extra=payload)
+            if self._recorder is not None:
+                # Single source of truth: the metric field set comes straight
+                # from ``to_dict()``.  Never let a logging fault propagate.
+                try:
+                    await self._recorder.emit_turn_metric(payload)
+                except Exception:  # pragma: no cover - recorder already guards
+                    pass

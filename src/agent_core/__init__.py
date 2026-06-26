@@ -18,6 +18,13 @@ from .hooks import (
     StopResult,
     SubagentStartHook,
 )
+from .logging import (
+    LoggingConfig,
+    aggregate_metrics,
+    export_dataset,
+    iter_conversations,
+    load_log,
+)
 from .mcp import McpSessionManager, register_mcp_tools
 from .plugins import Plugin, PluginRegistry
 from .skills import SkillDefinition, SkillRegistry, SkillTool
@@ -79,6 +86,11 @@ __all__ = [
     "HookRegistry",
     "HookResult",
     "list_agents",
+    "LoggingConfig",
+    "aggregate_metrics",
+    "export_dataset",
+    "iter_conversations",
+    "load_log",
     "McpOAuthConfig",
     "McpServerConfig",
     "McpServerTransport",

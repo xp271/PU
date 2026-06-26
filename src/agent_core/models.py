@@ -6,6 +6,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .logging.config import LoggingConfig
+
 
 # ---------------------------------------------------------------------------
 # Shared type aliases (single source of truth for repeated literal unions)
@@ -295,6 +297,10 @@ class AgentConfig(BaseModel):
     compression: CompressionConfig = Field(
         default_factory=CompressionConfig,
         description="Auto-compression configuration",
+    )
+    logging: LoggingConfig = Field(
+        default_factory=LoggingConfig,
+        description="Conversation logging / data-collection configuration (Item 12)",
     )
 
     # -- New fields for multi-provider support --
