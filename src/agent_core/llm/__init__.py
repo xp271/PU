@@ -6,6 +6,7 @@ from .events import InternalEvent, StopEvent, StreamStart, TokenCounts
 from . import anthropic  # noqa: F401
 from . import deepseek  # noqa: F401
 from . import openai  # noqa: F401
+from . import llamacpp  # noqa: F401
 
 __all__ = [
     "BaseClient",

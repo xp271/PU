@@ -2,9 +2,9 @@
 
 纯 Python 的 Agent 核心库——`Agent(config).run(prompt)` 即可调用，不绑定任何 UI/CLI。
 
-支持多 LLM Provider（Anthropic / OpenAI / DeepSeek）、内置文件与 Shell 工具、权限引擎、上下文自动压缩、MCP 协议集成、子 Agent（`Agent` 工具）、Hooks / Skills / Plugins 扩展系统，以及会话持久化与恢复。
+支持多 LLM Provider（Anthropic / OpenAI / DeepSeek）、内置文件与 Shell 工具、权限引擎、上下文自动压缩，以及 MCP 协议集成。
 
-> 状态：核心已全部落地（Phase 1–4）——工具框架、多 Provider LLM 层、Agent 主循环、工具管线 + 权限、自动压缩、MCP、子 Agent 执行引擎、Hooks/Skills/Plugins、会话持久化（JSONL 落盘 + `--resume`/`--continue`）。全套测试 ~957 passed。剩余收尾项：vcrpy 录制回放、MkDocs 文档、PyPI 发布。详见 `agent-core-todolist-python.md`。
+> 状态：Phase 1/2 已实现（工具框架、多 Provider LLM 层、Agent 主循环、工具管线 + 权限、自动压缩、MCP）。Phase 3 子 Agent 处于「定义」阶段（`AgentDefinition` 已落地，执行引擎 Item 8 开发中）。详见 `agent-core-todolist-python.md`。
 
 ## 安装
 
@@ -57,25 +57,6 @@ agent.on_permission_check(approve)
 
 未注册回调时：只读工具放行，破坏性工具默认拒绝。
 
-### 子 Agent / Skills / Hooks
-
-- **子 Agent**：内置 `Agent` 工具让 LLM 通过 tool_use 派生子 Agent（`GeneralPurpose` / `Explore` / `Plan`），权限不可提权、递归深度有界（`MAX_AGENT_DEPTH`），支持同步与后台（`run_in_background`）两种模式。
-- **Skills**：`<workspace>/.agent/skills/<name>/SKILL.md`（YAML frontmatter + 正文模板）定义可复用任务，经内置 `Skill` 工具以 inline / fork 方式执行。REPL 中 `/skills` 列出。
-- **Hooks / Plugins**：`PreToolUse` / `PostToolUse` / `Stop` / `SubagentStart` 四类 Hook 可拦截/改写/终止；Plugin 经 entry points 热插拔贡献工具、Hook、Skill、Agent 定义（`AgentConfig.auto_enable_plugins`）。
-
-## 会话持久化与恢复
-
-会话以 append-only JSONL 落盘到 `~/.agent/projects/{project_hash}/{session_id}.jsonl`（崩溃时最多丢失最后一行）；压缩采用 checkpoint 分段链，**保留压缩前完整 transcript** 供审计。
-
-```bash
-agent-core --continue            # 恢复本项目最近一次会话
-agent-core --resume <session_id> # 按 id 恢复指定会话
-```
-
-REPL 内：`/sessions` 列出已保存会话，`/clear` 清空当前历史。
-
-> v1 仅恢复对话历史；会话级权限记忆（"始终允许"）不落盘，恢复后需重新授权。
-
 ## 配置要点
 
 `AgentConfig` 常用字段：
@@ -94,15 +75,17 @@ API Key 缺省时从环境变量读取：`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` 
 
 ## CLI（交互式测试入口）
 
+推荐通过 uv 在项目 `.venv` 中启动，确保依赖（如 `ddgs`、`html2text`）齐全：
+
 ```bash
-agent-core                       # 交互式 REPL
-agent-core --continue            # 恢复最近会话
-agent-core --resume <id>         # 恢复指定会话
-echo "prompt" | agent-core       # 管道模式（一次性）
-python -m agent_core             # 模块启动（无需安装）
+uv run agent-core                # 交互式 REPL（推荐）
+echo "prompt" | uv run agent-core   # 管道模式（一次性）
+uv run python -m agent_core      # 模块启动
 ```
 
-REPL 内置命令：`/sessions`（会话列表）、`/skills`（可用 skill）、`/clear`（清空历史）。
+> **注意命名**：运行用连字符 `agent-core`（`[project.scripts]` 入口名）；`python -m` 后跟的是包名 `agent_core`（下划线）。`uv run agent_core` 会报 `program not found`。
+>
+> **不要用 `.venv` 之外的解释器跑**（如全局 conda / 系统 Python）。即便包做了 editable 安装，那些环境也缺 `ddgs` 等依赖，WebSearch 会报 “ddgs 库未安装”。`uv sync` 只同步 `.venv`，修不了外部解释器——直接 `uv run` 最稳妥。
 
 配置查找顺序（先找到的生效）：`$AGENT_CORE_CONFIG` → `./agent-core.config.json` → `~/.agent-core/config.json`。
 
@@ -111,8 +94,6 @@ REPL 内置命令：`/sessions`（会话列表）、`/skills`（可用 skill）�
 ```bash
 uv run pytest          # 仅收集 tests/（见 pyproject.toml 的 testpaths）
 ```
-
-当前 ~957 passed / 10 skipped，覆盖单元 + mock 集成，含各层 fallback / 边界（Hook 异常、Plugin 隔离、Provider 重试、工具异常、持久化分段链与恢复等）。
 
 ## 许可证
 

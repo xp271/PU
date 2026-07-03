@@ -49,6 +49,7 @@ _ENV_VAR_MAP: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "llamacpp": "LLAMACPP_API_KEY",
 }
 
 
@@ -180,9 +181,11 @@ def _load_config() -> AgentConfig:
     mcp_servers.update(raw.get("mcp_servers", {}))
 
     # -- Guard: refuse to start with no credentials at all --
+    # Providers that don't require authentication (e.g. local llama.cpp server).
+    _NO_AUTH_PROVIDERS = {"llamacpp"}
     if not any(api_keys.values()):
         provider = ModelId.parse(model).provider.value
-        if not api_keys.get(provider):
+        if provider not in _NO_AUTH_PROVIDERS and not api_keys.get(provider):
             env_var = _ENV_VAR_MAP.get(provider, f"{provider.upper()}_API_KEY")
             print(
                 f"[config] ERROR: No API key found for provider '{provider}'.\n"
@@ -201,6 +204,9 @@ def _load_config() -> AgentConfig:
         max_turns=max_turns,
         permission_mode=permission_mode,  # type: ignore[arg-type]
         mcp_servers=mcp_servers,  # type: ignore[arg-type]
+        allow_unknown_model=raw.get("allow_unknown_model", False),
+        base_urls=raw.get("base_urls", {}),
+        context_size=raw.get("context_size"),
     )
 
 
@@ -471,6 +477,20 @@ async def _repl(
                             print(f"  -> OK: {preview}")
                     elif msg.type == "error":
                         print(f"\n[ERROR] {msg.message}")
+                    elif msg.type == "compact":
+                        if msg.status == "started":
+                            print(
+                                f"\n[compact] compressing {msg.rounds_compressed} round(s) "
+                                f"(keeping {msg.rounds_preserved}), "
+                                f"tokens ~{msg.tokens_before}…",
+                                end="", flush=True,
+                            )
+                        elif msg.status == "completed":
+                            pct = int((1 - msg.compression_ratio) * 100) if msg.compression_ratio else 0
+                            print(
+                                f"\n[compact] done: {msg.tokens_before} → {msg.tokens_after} tokens "
+                                f"({pct}% reduced, {msg.retries_used} retries)",
+                            )
                     elif msg.type == "done":
                         print(f"\n--- {msg.stop_reason} | {msg.total_tokens} tokens ---")
             except KeyboardInterrupt:
@@ -552,6 +572,116 @@ async def _preflight_mcp(config: AgentConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
+# LLM server preflight (llama.cpp auto-start)
+# ---------------------------------------------------------------------------
+
+_LLAMACPP_SERVER_EXE = Path(__file__).resolve().parent.parent.parent / "llama.cpp" / "llama-server.exe"
+_LLAMACPP_MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "llama.cpp" / "models"
+_LLAMACPP_HEALTH_URL = "http://127.0.0.1:8080/v1/models"
+
+
+async def _preflight_llamacpp(config: AgentConfig) -> None:
+    """Ensure the llama.cpp server is running before the REPL starts.
+
+    1. Resolve the model name from config → GGUF file path.
+    2. Health-check the configured base_url.
+    3. If unreachable, spawn ``llama-server.exe`` with ``-m`` (single-model mode).
+    4. Poll until ready (timeout 120 s — large models take time to load).
+    """
+    try:
+        model_id = config.model_id
+    except ValueError:
+        return
+    if model_id.provider != ModelProvider.LLAMACPP:
+        return
+
+    import asyncio
+
+    import httpx
+
+    base_url = config.get_base_url(ModelProvider.LLAMACPP) or "http://127.0.0.1:8080/v1"
+    health_url = base_url.rstrip("/") + "/models"
+
+    # 1. Quick check — is it already running?
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as client:
+            r = await client.get(health_url)
+            if r.status_code == 200:
+                models = r.json().get("data", [])
+                model_ids = [m.get("id", "?") for m in models]
+                print(f"[llamacpp] server already running — {len(models)} model(s): {', '.join(model_ids)}")
+                return
+    except Exception:
+        pass
+
+    # 2. Resolve model file from config
+    model_name = model_id.name
+    model_path = _LLAMACPP_MODELS_DIR / f"{model_name}.gguf"
+    if not model_path.is_file():
+        # Try glob match in case filename differs slightly
+        candidates = list(_LLAMACPP_MODELS_DIR.glob(f"{model_name}*"))
+        if candidates:
+            model_path = candidates[0]
+        else:
+            print(
+                f"[llamacpp] model file not found: {model_path}\n"
+                f"  Place the GGUF file in {_LLAMACPP_MODELS_DIR}/",
+                file=sys.stderr,
+            )
+            return
+
+    # 3. Not running — start in single-model mode
+    if not _LLAMACPP_SERVER_EXE.is_file():
+        print(
+            f"[llamacpp] server not running and {_LLAMACPP_SERVER_EXE} not found.",
+            file=sys.stderr,
+        )
+        return
+
+    ctx_size = config.context_size or 8192
+    print(f"[llamacpp] starting server with model: {model_path.name} (ctx={ctx_size})")
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(_LLAMACPP_SERVER_EXE),
+            "-m", str(model_path),
+            "--host", "127.0.0.1",
+            "--port", "8080",
+            "--ctx-size", str(ctx_size),
+            "--cache-type-k", "q8_0",
+            "--cache-type-v", "q8_0",
+            "--tools", "all",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        print(f"[llamacpp] failed to start server: {exc}", file=sys.stderr)
+        return
+
+    # 4. Poll until ready (large models may take >60 s to load)
+    print("[llamacpp] loading model…", end="", flush=True)
+    deadline = asyncio.get_event_loop().time() + 120.0
+    while asyncio.get_event_loop().time() < deadline:
+        if proc.returncode is not None:
+            print(f"\n[llamacpp] server exited unexpectedly (code={proc.returncode})", file=sys.stderr)
+            return
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(2.0)) as client:
+                r = await client.get(health_url)
+                if r.status_code == 200:
+                    models = r.json().get("data", [])
+                    model_ids = [m.get("id", "?") for m in models]
+                    print(f"\n[llamacpp] ready — {len(models)} model(s): {', '.join(model_ids)}")
+                    return
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
+        print(".", end="", flush=True)
+
+    print(f"\n[llamacpp] server did not become ready within 120 s (pid={proc.pid})", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -561,7 +691,8 @@ async def _main(
     resume_id: str | None = None,
     continue_last: bool = False,
 ) -> None:
-    """Async entry: preflight MCP servers, then run the REPL."""
+    """Async entry: preflight LLM server, preflight MCP servers, then run the REPL."""
+    await _preflight_llamacpp(config)
     await _preflight_mcp(config)
     await _repl(config, resume_id=resume_id, continue_last=continue_last)
 

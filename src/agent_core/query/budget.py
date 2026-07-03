@@ -34,20 +34,35 @@ _MODEL_CONTEXT_WINDOWS: dict[tuple[ModelProvider, str | None], int] = {
     (ModelProvider.DEEPSEEK, "deepseek-v4-flash"): 128_000,
 }
 
+# Provider-level defaults when the specific model name isn't in the map.
+_PROVIDER_CONTEXT_DEFAULTS: dict[ModelProvider, int] = {
+    ModelProvider.LLAMACPP: 8192,
+}
+
 _DEFAULT_CONTEXT_WINDOW = 200_000
 _TRUNCATION_RATIO = 0.8
 _DIMINISHING_RETURNS_THRESHOLD = 500
 _DIMINISHING_RETURNS_WINDOW = 3
 
 
-def get_context_window(model_id: ModelId) -> int:
+def get_context_window(model_id: ModelId, *, config_override: int | None = None) -> int:
     """Return the context-window size for *model_id*.
 
-    Falls back to 200 000 tokens for unknown models.
+    Resolution order:
+    1. *config_override* (e.g. ``AgentConfig.context_size`` from config file).
+    2. Exact model match in ``_MODEL_CONTEXT_WINDOWS``.
+    3. Provider-level default in ``_PROVIDER_CONTEXT_DEFAULTS``.
+    4. Global fallback (200 000).
     """
-    return _MODEL_CONTEXT_WINDOWS.get(
-        (model_id.provider, model_id.name), _DEFAULT_CONTEXT_WINDOW
-    )
+    if config_override is not None:
+        return config_override
+    exact = _MODEL_CONTEXT_WINDOWS.get((model_id.provider, model_id.name))
+    if exact is not None:
+        return exact
+    provider_default = _PROVIDER_CONTEXT_DEFAULTS.get(model_id.provider)
+    if provider_default is not None:
+        return provider_default
+    return _DEFAULT_CONTEXT_WINDOW
 
 
 # ---------------------------------------------------------------------------

@@ -291,7 +291,7 @@ async def _run_turns(
 
     budget = TokenBudget(
         max_turns=config.max_turns,
-        context_window=get_context_window(model_id),
+        context_window=get_context_window(model_id, config_override=config.context_size),
     )
 
     total_tokens = 0

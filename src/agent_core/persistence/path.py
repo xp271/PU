@@ -15,8 +15,8 @@ from pathlib import Path
 # Constants
 # ---------------------------------------------------------------------------
 
-AGENT_HOME = os.path.join(os.path.expanduser("~"), ".agent")
-PROJECTS_DIR = "projects"
+AGENT_HOME = os.path.join(os.getcwd(), ".agent")
+PROJECTS_DIR = "sessions"
 CURRENT_VERSION = 1
 
 
@@ -39,22 +39,22 @@ def compute_project_hash(workspace_root: str | None = None) -> str:
 
 
 def project_dir(project_hash: str) -> str:
-    """``~/.agent/projects/{project_hash}/``"""
+    """``{cwd}/.agent/sessions/{project_hash}/``"""
     return os.path.join(AGENT_HOME, PROJECTS_DIR, project_hash)
 
 
 def session_jsonl_path(project_hash: str, session_id: str) -> str:
-    """``~/.agent/projects/{project_hash}/{session_id}.jsonl``"""
+    """``{cwd}/.agent/sessions/{project_hash}/{session_id}.jsonl``"""
     return os.path.join(project_dir(project_hash), f"{session_id}.jsonl")
 
 
 def sidechain_dir(project_hash: str, session_id: str) -> str:
-    """``~/.agent/projects/{project_hash}/{session_id}/``"""
+    """``{cwd}/.agent/sessions/{project_hash}/{session_id}/``"""
     return os.path.join(project_dir(project_hash), session_id)
 
 
 def sidechain_jsonl_path(project_hash: str, session_id: str, agent_id: str) -> str:
-    """``~/.agent/projects/{project_hash}/{session_id}/{agent_id}.jsonl``"""
+    """``{cwd}/.agent/sessions/{project_hash}/{session_id}/{agent_id}.jsonl``"""
     return os.path.join(sidechain_dir(project_hash, session_id), f"{agent_id}.jsonl")
 
 

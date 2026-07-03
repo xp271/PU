@@ -37,7 +37,7 @@ class TestComputeProjectHash:
 class TestPathFunctions:
     def test_project_dir(self):
         d = project_dir("abc123")
-        assert d.endswith(os.path.join(".agent", "projects", "abc123"))
+        assert d.endswith(os.path.join(".agent", "sessions", "abc123"))
 
     def test_session_jsonl_path(self):
         p = session_jsonl_path("abc123", "session-1")

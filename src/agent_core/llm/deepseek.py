@@ -228,7 +228,7 @@ class DeepSeekClient(BaseClient):
 
         yield StreamStart(
             turn_index=turn_index,
-            provider="deepseek",
+            provider=self.provider.value,
             model=self.model,
         )
 

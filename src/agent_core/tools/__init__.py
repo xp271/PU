@@ -6,6 +6,8 @@ from .file_write import FileWriteTool
 from .glob_tool import GlobTool
 from .grep_tool import GrepTool
 from .registry import get_tool, register_tool, registered_tools, ToolRegistry
+from .web_fetch import WebFetchTool
+from .web_search import WebSearchTool
 
 # AgentTool is registered via @register_tool when agents/__init__.py imports it.
 # We do NOT import it here — that would create a circular chain:
@@ -23,6 +25,8 @@ __all__ = [
     "ToolCallResult",
     "ToolRegistry",
     "ToolUseContext",
+    "WebFetchTool",
+    "WebSearchTool",
     "get_tool",
     "register_tool",
     "registered_tools",

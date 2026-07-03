@@ -25,6 +25,7 @@ class ModelProvider(str, Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     DEEPSEEK = "deepseek"
+    LLAMACPP = "llamacpp"
 
     @classmethod
     def known_providers(cls) -> set[str]:
@@ -48,6 +49,7 @@ class ModelProvider(str, Enum):
                 "deepseek-v4-pro",
                 "deepseek-v4-flash",
             ],
+            cls.LLAMACPP: ["*"],
         }
 
 
@@ -285,6 +287,16 @@ class AgentConfig(BaseModel):
             "Unknown names are still warned about, not rejected."
         ),
     )
+    context_size: int | None = Field(
+        default=None,
+        ge=512,
+        le=1_000_000,
+        description=(
+            "Context window size in tokens. For local providers (e.g. llamacpp) "
+            "this is passed as --ctx-size to the server at startup. When None, "
+            "the provider default is used (8192 for llamacpp)."
+        ),
+    )
     max_concurrency: int = Field(
         default=5,
         ge=1,
@@ -333,6 +345,7 @@ class AgentConfig(BaseModel):
             ModelProvider.ANTHROPIC: "ANTHROPIC_API_KEY",
             ModelProvider.OPENAI: "OPENAI_API_KEY",
             ModelProvider.DEEPSEEK: "DEEPSEEK_API_KEY",
+            ModelProvider.LLAMACPP: "LLAMACPP_API_KEY",
         }
         key = self.api_keys.get(provider.value)
         if key:

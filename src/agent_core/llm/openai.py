@@ -225,7 +225,7 @@ class OpenAIClient(BaseClient):
 
         yield StreamStart(
             turn_index=turn_index,
-            provider="openai",
+            provider=self.provider.value,
             model=self.model,
         )
 

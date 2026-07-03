@@ -295,17 +295,15 @@ def _sidechain_dir(
 ) -> str:
     """Compute the sidechain directory for a parent session.
 
-    When *session_id* and *project_hash* are both set, uses the new
-    Phase B path scheme: ``~/.agent/projects/{hash}/{session_id}/``.
-    Otherwise falls back to the legacy path:
-    ``~/.agent/sessions/{parent_trace_id}/``.
+    When *session_id* and *project_hash* are both set, uses:
+    ``{cwd}/.agent/sessions/{hash}/{session_id}/``.
+    Otherwise falls back to:
+    ``{cwd}/.agent/sessions/{parent_trace_id}/``.
     """
-    home = os.path.expanduser("~")
+    base = os.path.join(os.getcwd(), ".agent", "sessions")
     if session_id is not None and project_hash is not None:
-        return os.path.join(
-            home, ".agent", "projects", project_hash, session_id
-        )
-    return os.path.join(home, ".agent", "sessions", parent_trace_id)
+        return os.path.join(base, project_hash, session_id)
+    return os.path.join(base, parent_trace_id)
 
 
 def _populate_child_registry(
