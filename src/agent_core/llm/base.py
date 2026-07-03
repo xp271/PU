@@ -64,11 +64,37 @@ def get_client(model_id: "ModelId", config: "AgentConfig") -> BaseClient:
             f"No client registered for provider: {provider}. "
             f"Available providers: {list(_PROVIDER_CLIENTS)}"
         )
+    sampling_kwargs: dict[str, Any] = {}
+    sampling_extra: dict[str, Any] = {}
+    if config.sampling and provider == ModelProvider.LLAMACPP:
+        sampling_kwargs, sampling_extra = _sampling_params(config.sampling)
     return client_cls(
         model=model_id.name,
         api_key=config.get_api_key(provider),
         base_url=config.get_base_url(provider),
+        sampling_kwargs=sampling_kwargs if sampling_kwargs else None,
+        sampling_extra=sampling_extra if sampling_extra else None,
     )
+
+
+def _sampling_params(sampling: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split sampling config into (openai_kwargs, extra_body).
+
+    Standard OpenAI params (temperature, top_p) go to kwargs.
+    llama.cpp extensions (top_k, repeat_penalty) go to extra_body,
+    which the OpenAI SDK forwards as-is in the JSON body.
+    """
+    kwargs: dict[str, Any] = {}
+    extra: dict[str, Any] = {}
+    if sampling.temperature is not None:
+        kwargs["temperature"] = sampling.temperature
+    if sampling.top_p is not None:
+        kwargs["top_p"] = sampling.top_p
+    if sampling.top_k is not None:
+        extra["top_k"] = sampling.top_k
+    if sampling.repeat_penalty is not None:
+        extra["repeat_penalty"] = sampling.repeat_penalty
+    return kwargs, extra
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +121,14 @@ class BaseClient(ABC):
         model: str,
         api_key: str | None,
         base_url: str | None,
+        sampling_kwargs: dict[str, Any] | None = None,
+        sampling_extra: dict[str, Any] | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
+        self.sampling_kwargs = sampling_kwargs
+        self.sampling_extra = sampling_extra
 
     # -- provider-specific class methods (override in each subclass) --
 

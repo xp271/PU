@@ -47,12 +47,28 @@ class LlamaCppClient(OpenAIClient):
         model: str,
         api_key: str | None,
         base_url: str | None,
+        sampling_kwargs: dict[str, Any] | None = None,
+        sampling_extra: dict[str, Any] | None = None,
     ) -> None:
+        import httpx
+
         super().__init__(
             model=model,
             api_key=api_key or "not-needed",
             base_url=base_url or _DEFAULT_BASE_URL,
+            sampling_kwargs=sampling_kwargs,
+            sampling_extra=sampling_extra,
         )
+        # Re-create the OpenAI client with system proxy bypassed —
+        # local server must be reached directly on 127.0.0.1.
+        kwargs: dict[str, Any] = {
+            "api_key": api_key or "not-needed",
+            "base_url": base_url or _DEFAULT_BASE_URL,
+            "http_client": httpx.AsyncClient(
+                transport=httpx.AsyncHTTPTransport(proxy=None),
+            ),
+        }
+        self._client = openai.AsyncOpenAI(**kwargs)
 
     @classmethod
     def classify_error(cls, exception: Exception) -> ErrorCategory:

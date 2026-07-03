@@ -68,8 +68,14 @@ class DeepSeekClient(BaseClient):
         model: str,
         api_key: str | None,
         base_url: str | None,
+        sampling_kwargs: dict[str, Any] | None = None,
+        sampling_extra: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(model, api_key, base_url)
+        super().__init__(
+            model, api_key, base_url,
+            sampling_kwargs=sampling_kwargs,
+            sampling_extra=sampling_extra,
+        )
         kwargs: dict[str, Any] = {}
         if api_key:
             kwargs["api_key"] = api_key
@@ -273,6 +279,12 @@ class DeepSeekClient(BaseClient):
         max_tokens: int,
     ) -> AsyncGenerator[InternalEvent, None]:
         """Single-attempt streaming helper (retried by ``stream_messages``)."""
+        kwargs: dict[str, Any] = {}
+        if self.sampling_kwargs:
+            kwargs.update(self.sampling_kwargs)
+        if self.sampling_extra:
+            kwargs["extra_body"] = self.sampling_extra
+
         stream = await self._client.chat.completions.create(
             model=self.model,
             messages=openai_messages,
@@ -280,6 +292,7 @@ class DeepSeekClient(BaseClient):
             max_tokens=max_tokens,
             stream=True,
             stream_options={"include_usage": True},
+            **kwargs,
         )
 
         current_tool_calls: dict[int, dict[str, Any]] = {}

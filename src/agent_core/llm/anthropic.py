@@ -67,8 +67,14 @@ class AnthropicClient(BaseClient):
         model: str,
         api_key: str | None,
         base_url: str | None,
+        sampling_kwargs: dict[str, Any] | None = None,
+        sampling_extra: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(model, api_key, base_url)
+        super().__init__(
+            model, api_key, base_url,
+            sampling_kwargs=sampling_kwargs,
+            sampling_extra=sampling_extra,
+        )
         kwargs: dict[str, Any] = {}
         if api_key:
             kwargs["api_key"] = api_key

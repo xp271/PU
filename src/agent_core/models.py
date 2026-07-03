@@ -167,6 +167,58 @@ class CompressionConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# SamplingConfig
+# ---------------------------------------------------------------------------
+
+
+class SamplingConfig(BaseModel):
+    """Sampling parameter overrides for LLM inference.
+
+    All fields are optional — when None the provider/API default is used.
+    Currently effective for OpenAI-compatible APIs (OpenAI, DeepSeek, llamacpp).
+    """
+
+    temperature: float | None = Field(
+        default=None, ge=0.0, le=2.0,
+        description="Sampling temperature (0.0 = deterministic)",
+    )
+    top_p: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Nucleus sampling top-p",
+    )
+    top_k: int | None = Field(
+        default=None, ge=1,
+        description="Top-k sampling (llamacpp specific, ignored by OpenAI/DeepSeek)",
+    )
+    repeat_penalty: float | None = Field(
+        default=None, ge=1.0, le=2.0,
+        description="Repeat penalty (llamacpp specific, ignored by OpenAI/DeepSeek)",
+    )
+
+
+# ---------------------------------------------------------------------------
+# LlamaCppConfig
+# ---------------------------------------------------------------------------
+
+
+class LlamaCppConfig(BaseModel):
+    """llama.cpp server configuration.  Only effective for llamacpp provider."""
+
+    gpu_layers: int = Field(
+        default=99, ge=0, le=999,
+        description="Number of layers to offload to GPU (-ngl). 99 = all layers.",
+    )
+    cache_type_k: str = Field(
+        default="q8_0",
+        description="KV cache K quantization type (f16, q8_0, q4_0)",
+    )
+    cache_type_v: str = Field(
+        default="q8_0",
+        description="KV cache V quantization type (f16, q8_0, q4_0)",
+    )
+
+
+# ---------------------------------------------------------------------------
 # MCP configuration models
 # ---------------------------------------------------------------------------
 
@@ -313,6 +365,17 @@ class AgentConfig(BaseModel):
     logging: LoggingConfig = Field(
         default_factory=LoggingConfig,
         description="Conversation logging / data-collection configuration (Item 12)",
+    )
+    sampling: SamplingConfig | None = Field(
+        default=None,
+        description=(
+            "Sampling parameter overrides. When None, provider/API defaults "
+            "are used. Effective for OpenAI-compatible APIs (OpenAI, DeepSeek, llamacpp)."
+        ),
+    )
+    llamacpp: LlamaCppConfig = Field(
+        default_factory=LlamaCppConfig,
+        description="llama.cpp server options (GPU layers, KV cache quantization, etc.)",
     )
 
     # -- New fields for multi-provider support --
