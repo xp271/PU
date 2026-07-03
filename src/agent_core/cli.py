@@ -639,7 +639,7 @@ async def _preflight_llamacpp(config: AgentConfig) -> None:
         return
 
     ctx_size = config.context_size or 8192
-    print(f"[llamacpp] starting server with model: {model_path.name} (ctx={ctx_size})")
+    print(f"[llamacpp] starting server with model: {model_path.name} (ctx={ctx_size}, gpu=all)")
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -650,6 +650,7 @@ async def _preflight_llamacpp(config: AgentConfig) -> None:
             "--ctx-size", str(ctx_size),
             "--cache-type-k", "q8_0",
             "--cache-type-v", "q8_0",
+            "-ngl", "99",
             "--tools", "all",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
