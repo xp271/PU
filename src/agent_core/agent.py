@@ -106,14 +106,16 @@ class Agent:
             self._sink = None
             self._recorder = None
 
-    async def run(self, prompt: str) -> AgentResult:
+    async def run(
+        self, prompt: str, *, system: str | None = None
+    ) -> AgentResult:
         content_parts: list[str] = []
         total_tokens = 0
         tool_uses = 0
         stop_reason: StopReason = "end_turn"
         error_detail: str | None = None
 
-        async for message in self.stream(prompt):
+        async for message in self.stream(prompt, system=system):
             if message.type == "assistant_text":
                 content_parts.append(message.content)
             elif message.type == "tool_use":
@@ -136,7 +138,9 @@ class Agent:
             error_detail=error_detail,
         )
 
-    async def stream(self, prompt: str) -> AsyncGenerator[AgentMessage, None]:
+    async def stream(
+        self, prompt: str, *, system: str | None = None
+    ) -> AsyncGenerator[AgentMessage, None]:
         # ``aclosing`` guarantees the inner ``query`` generator is closed in
         # *this* task even if the consumer abandons us mid-stream — so MCP
         # teardown (query's finally) never runs at event-loop shutdown in a
@@ -160,6 +164,7 @@ class Agent:
                 trace_id=self._trace_id,
                 permission_callback=self._permission_callback,
                 workspace_root=self._config.workspace_root,
+                system=system,
                 initial_messages=(
                     session.snapshot_for_next_turn() if session is not None else None
                 ),

@@ -296,6 +296,8 @@ async def _run_turns(
 
     total_tokens = 0
     error_detail: str | None = None
+    _output_truncated_retries = 0
+    _OUTPUT_TRUNCATED_MAX_RETRIES = 3
 
     # ---- 2. Turn loop ------------------------------------------------------
     for turn_index in range(1, config.max_turns + 1):
@@ -381,6 +383,7 @@ async def _run_turns(
 
                     estimated = new_estimated
                     tool_context.messages = messages
+                    budget.reset_last_actual()
 
                     # Compression succeeded but might still be over threshold
                     if budget.needs_truncation(estimated):
@@ -388,6 +391,7 @@ async def _run_turns(
                             messages, max_tokens=budget.truncation_threshold
                         )
                         tool_context.messages = messages
+                        budget.reset_last_actual()
 
                 except CompressionError as exc:
                     logger.warning(
@@ -404,6 +408,7 @@ async def _run_turns(
                         messages, max_tokens=budget.truncation_threshold
                     )
                     tool_context.messages = messages
+                    budget.reset_last_actual()
 
             else:
                 # Compression unavailable — direct truncation
@@ -411,6 +416,7 @@ async def _run_turns(
                     messages, max_tokens=budget.truncation_threshold
                 )
                 tool_context.messages = messages
+                budget.reset_last_actual()
 
         # -- 2b. LLM call ---------------------------------------------------
         try:
@@ -419,7 +425,7 @@ async def _run_turns(
                 messages=messages,
                 tools=tools_schema,
                 system=system if system else None,
-                max_tokens=4096,
+                max_tokens=10000,
                 turn_index=turn_index,
             )
             wrapped = tracer.wrap(raw_stream)
@@ -490,6 +496,34 @@ async def _run_turns(
         messages.append(
             _build_assistant_message(assistant_texts, tool_uses_in_turn)
         )
+
+        # -- 2c5. Output truncated → roll back & retry with limit prompt -----
+        if turn_stop_reason == "output_truncated":
+            _output_truncated_retries += 1
+            if _output_truncated_retries > _OUTPUT_TRUNCATED_MAX_RETRIES:
+                yield DoneMessage(
+                    stop_reason="error",
+                    total_tokens=total_tokens,
+                    error_detail=(
+                        f"Output truncated {_output_truncated_retries} times "
+                        f"(max {_OUTPUT_TRUNCATED_MAX_RETRIES}); giving up."
+                    ),
+                    final_messages=messages,
+                )
+                return
+            # Remove the truncated incomplete message
+            messages.pop()
+            # Instruct the model to continue concisely
+            messages.append({
+                "role": "user",
+                "content": [{"type": "text", "text": (
+                    "Your previous response was truncated because it exceeded "
+                    "the output length limit. Please continue from where you "
+                    "left off, keeping your output within the limit."
+                )}],
+            })
+            budget.reset_diminishing_returns()
+            continue
 
         # -- 2d. No tool uses → terminal turn -------------------------------
         if not tool_uses_in_turn:

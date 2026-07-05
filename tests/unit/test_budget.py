@@ -95,7 +95,7 @@ class TestTokenBudget:
 
     def test_truncation_threshold(self) -> None:
         tb = TokenBudget(max_turns=20, context_window=200_000)
-        assert tb.truncation_threshold == 160_000  # 80 %
+        assert tb.truncation_threshold == 170_000  # 85 %
 
     def test_record_turn(self) -> None:
         tb = TokenBudget(max_turns=20, context_window=200_000)
@@ -229,3 +229,37 @@ class TestTokenBudget:
         msgs = [{"role": "user", "content": []}]
         est = estimate_tokens_from_messages(msgs)
         assert est == 0
+
+    # -- new: last_actual_input_tokens -------------------------------------------------
+
+    def test_needs_truncation_uses_max_of_estimated_and_actual(self) -> None:
+        """When actual > estimated, the larger value (actual) is used."""
+        tb = TokenBudget(max_turns=20, context_window=200_000)
+        # threshold = 170_000 (0.85 × 200_000)
+        tb.last_actual_input_tokens = 45_000
+        # estimated is small but actual is under threshold → no truncation
+        assert not tb.needs_truncation(5_000)
+        # actual is huge → truncation triggered
+        tb.last_actual_input_tokens = 180_000
+        assert tb.needs_truncation(5_000)
+
+    def test_reset_last_actual(self) -> None:
+        tb = TokenBudget(max_turns=20, context_window=200_000)
+        tb.last_actual_input_tokens = 100_000
+        tb.reset_last_actual()
+        assert tb.last_actual_input_tokens == 0
+
+    def test_needs_truncation_after_reset(self) -> None:
+        """After reset, only the estimated value matters."""
+        tb = TokenBudget(max_turns=20, context_window=200_000)
+        tb.last_actual_input_tokens = 180_000  # would trigger if used
+        tb.reset_last_actual()
+        # now only estimated (5_000) counts → under threshold
+        assert not tb.needs_truncation(5_000)
+        # large estimate still triggers
+        assert tb.needs_truncation(180_000)
+
+    def test_record_turn_stores_actual_input_tokens(self) -> None:
+        tb = TokenBudget(max_turns=20, context_window=200_000)
+        tb.record_turn(1, input_tokens=12_345, output_tokens=678)
+        assert tb.last_actual_input_tokens == 12_345

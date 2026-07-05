@@ -3,7 +3,7 @@
 > 目标：纯 Python 库， `Agent(config).run(prompt)` 即可调用，不绑定任何 UI/CLI。
 > 每个条目含具体开发事项和预估工时。
 >
-> **当前进度（~95%）**：Phase 1–4 核心全部落地——脚手架/Tool 框架、多 Provider LLM、Agent 主循环、工具管线+权限、自动压缩、MCP、Agent 定义、子 Agent 执行引擎、Hooks/Skills/Plugins、会话持久化（Item 10 Phase A+B）。全套 ~957 passed。仅余 #11 收尾：vcrpy 录制回放、MkDocs 文档、PyPI 发布。
+> **当前进度（~92%）**：Phase 1–4 核心全部落地——脚手架/Tool 框架、多 Provider LLM、Agent 主循环、工具管线+权限、自动压缩、MCP、Agent 定义、子 Agent 执行引擎、Hooks/Skills/Plugins、会话持久化（Item 10 Phase A+B）。全套 ~957 passed。余下：vcrpy 录制回放、MkDocs 文档、PyPI 发布、CI/CD、examples 补齐及新模块文档化。
 
 ---
 
@@ -22,7 +22,11 @@ src/agent_core/
 ├── __init__.py          # 公开 API 导出
 ├── __main__.py          # python -m agent_core 入口
 ├── agent.py             # Agent 主类
-├── cli.py               # 交互式 REPL 测试入口
+├── cli/                 # 交互式 REPL 测试入口 + QQ Bot 命令
+│   ├── __init__.py      # 公开导出 main
+│   ├── _main.py         # 交互式 REPL (agent-core 命令)
+│   ├── _config.py       # 配置文件加载
+│   └── qqbot.py         # QQ Bot 启动命令
 ├── models.py            # 所有 Pydantic 数据模型
 ├── agents/              # Agent 定义 + 执行引擎（详见第 7-8 节）
 │   ├── __init__.py      # 公开导出 + 触发内置 Agent 注册
@@ -52,7 +56,14 @@ src/agent_core/
 │   ├── config.py        # 配置加载链: .mcp.json → env 展开 → McpServerConfig
 │   ├── registry.py      # MCP 工具 → Tool 子类动态桥接
 │   └── resources.py     # MCP Resource/Prompt 获取（预留 Phase 3）
-└── tools/               # 工具系统（详见第 2 节）
+├── tools/               # 工具系统（详见第 2 节）
+├── benchmarks/           # Agent 评测框架
+│   └── swebench/         # SWE-Bench Pro 评测（dataset/runner/patch/prompt）
+├── bridge/               # Agent Bridge — 跨 Agent 通信
+│   ├── agent_bridge.py   # Bridge 协议处理
+│   └── text_splitter.py  # 长文本分片
+└── channels/             # IM 频道适配器
+    └── qq_bot/           # QQ Bot 频道（channel/client/types）
 ```
 
 **依赖**（`pyproject.toml`）: Python >= 3.12, pydantic >= 2, anthropic >= 0.105.2, openai >= 2, aiofiles >= 24, mcp >= 1.0, tenacity >= 9, tree-sitter >= 0.24, tree-sitter-bash >= 0.23, charset-normalizer >= 3, python-frontmatter >= 1。
@@ -92,11 +103,6 @@ from agent_core import (
     # 子 Agent 执行引擎
     run_agent,
     AgentTool,
-    # 权限
-    PermissionEngine,
-    PermissionOutcome,
-    SessionPermissionStore,
-
     # 工具系统
     Tool,
     ToolCallResult,
@@ -108,6 +114,8 @@ from agent_core import (
     FileWriteTool,
     GlobTool,
     GrepTool,
+    WebFetchTool,
+    WebSearchTool,
     get_tool,
     register_tool,
     registered_tools,
@@ -157,10 +165,10 @@ result = await agent.run("帮我读取 README.md 的内容")
 **构造函数**
 
 ```
-Agent(config: AgentConfig) -> None
+Agent(config: AgentConfig, session: SessionState | None = None) -> None
 ```
 
-接收一个 `AgentConfig` 实例，内部保存配置引用并初始化权限回调槽位为 `None`。
+接收一个 `AgentConfig` 实例和一个可选的 `SessionState`（用于跨 prompt 维持对话历史和权限记忆），内部保存配置引用并初始化权限回调槽位为 `None`。
 
 **方法**
 
@@ -191,6 +199,14 @@ PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
 | `hooks` | `list[Any]` | `[]` | Agent 启动时注册的 Hook 实例。 |
 | `api_keys` | `dict[str, str]` | `{}` | Provider → API Key 映射（如 `{"deepseek": "sk-..."}`）。缺省时从环境变量读取（`ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`、`OPENAI_API_KEY` 等）。 |
 | `base_urls` | `dict[str, str]` | `{}` | Provider → 自定义 base URL（代理、自托管场景）。仅替换同 provider 的默认 API 端点。 |
+| `workspace_root` | `str \| None` | `None` | 工作区根目录，文件/路径工具的安全边界（None 时不限制）。 |
+| `context_size` | `int \| None` | `None` | 上下文窗口大小（tokens），llamacpp 等本地 provider 传递给 server 的 `--ctx-size`。 |
+| `max_concurrency` | `int` | `5` | 并发安全工具的最大并行执行数（1–20）。 |
+| `compression` | `CompressionConfig` | `CompressionConfig()` | 自动压缩配置（enabled/max_retries/summary_max_tokens 等）。 |
+| `logging` | `LoggingConfig` | `LoggingConfig()` | 会话日志/数据采集配置（enabled/sample_rate/rolling 等）。 |
+| `sampling` | `SamplingConfig \| None` | `None` | LLM 采样参数覆写（temperature/top_p/top_k/repeat_penalty）。仅 OpenAI 兼容 API 有效。 |
+| `llamacpp` | `LlamaCppConfig` | `LlamaCppConfig()` | llama.cpp 服务器选项（GPU 层数/KV cache 量化）。 |
+| `auto_enable_plugins` | `list[str]` | `[]` | Agent 启动时自动激活的插件名列表。 |
 | `allow_unknown_model` | `bool` | `False` | 为 `True` 时允许使用已知 provider 列表之外的模型标识（如代理/自托管/兼容 API 场景）。 |
 
 **`ModelProvider` 枚举**
@@ -198,8 +214,9 @@ PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
 ```python
 class ModelProvider(str, Enum):
     ANTHROPIC = "anthropic"
-    DEEPSEEK = "deepseek"
     OPENAI = "openai"
+    DEEPSEEK = "deepseek"
+    LLAMACPP = "llamacpp"
 ```
 
 **`ModelId` —— Provider 无关的模型标识**
@@ -334,6 +351,9 @@ class ToolUseContext:
     parent_disallowed_tools: frozenset[str] = field(default_factory=frozenset)
     agent_depth: int = 0                  # 嵌套深度（防止无限递归）
     notification_queue: list[str] | None = None  # 异步通知投递队列
+    session_id: str | None = None           # Phase B: 父会话 ID（用于 sidechain 落盘）
+    project_hash: str | None = None         # Phase B: 项目哈希（用于 sidechain 路径）
+    hook_registry: Any = None               # HookRegistry | None（§Item 9）
 ```
 
 **安全边界**：所有文件/路径类工具在操作前必须通过 `check_workspace()` 校验目标路径位于 `workspace_root` 之内，否则返回 `PermissionError`。
@@ -525,6 +545,53 @@ class BashInput(BaseModel):
 - 非零退出码时在结果末尾追加 `(exit code: N)` 并将 `is_error=True`。
 - `working_dir` 受 workspace 边界检查约束。
 
+##### WebFetchTool (`name = "WebFetch"`)
+
+| 属性 | 值 |
+|------|-----|
+| 并发安全 | `False` |
+| 只读 | `False` |
+| 破坏性 | `False` |
+
+**Input**
+
+```python
+class WebFetchInput(BaseModel):
+    url: str              # 目标 URL（仅 http/https）
+    max_length: int = 100000  # 返回内容最大字符数（1–500000）
+```
+
+**行为**：
+- 使用 `httpx.AsyncClient` 异步抓取，SSRF 主机校验。
+- 最多跟随 5 次重定向（每跳重校验 SSRF）。
+- 硬性下载上限 5MB，超出截断。
+- 返回 HTML→Markdown 转换后的文本内容。
+
+##### WebSearchTool (`name = "WebSearch"`)
+
+| 属性 | 值 |
+|------|-----|
+| 并发安全 | `True` |
+| 只读 | `True` |
+| 破坏性 | `False` |
+
+**Input**
+
+```python
+class WebSearchInput(BaseModel):
+    query: str                 # 搜索查询字符串
+    max_results: int = 10      # 最大返回结果数（1–30）
+    search_type: SearchType = "text"   # text/images/videos/news
+    region: str = "us-en"      # 区域代码（cn-zh, us-en, uk-en）
+    safe_search: str = "moderate"      # on/moderate/off
+    time_range: str | None = None      # d/w/m/y 时间范围过滤
+```
+
+**行为**：
+- 基于 `ddgs` 库调用 DuckDuckGo 搜索（通过 `asyncio.to_thread` 避免阻塞事件循环）。
+- 返回结构化结果列表（title/url/description）。
+- `ddgs` 不可用时返回错误提示。
+
 #### 2.6 文件状态管理 (`tools/_io.py`)
 
 内部工具模块，被所有文件类工具共享使用。
@@ -593,8 +660,9 @@ InternalEvent = Annotated[
 ```python
 class ModelProvider(str, Enum):
     ANTHROPIC = "anthropic"
-    DEEPSEEK = "deepseek"
     OPENAI = "openai"
+    DEEPSEEK = "deepseek"
+    LLAMACPP = "llamacpp"
 
     @classmethod
     def known_providers(cls) -> set[str]: ...
@@ -771,6 +839,26 @@ StreamStart → AssistantText* → (ToolUse)* → TokenCounts → StopEvent
 
 ---
 
+#### 3.5.6 LlamaCppClient (`llm/llamacpp.py`)
+
+**自包含**：所有 llama.cpp 专属逻辑集中在此文件。llama.cpp 提供 OpenAI 兼容 API，因此复用 `openai` SDK。
+
+| 方法 | 说明 |
+|------|------|
+| `__init__()` | 默认 `base_url="http://127.0.0.1:8080/v1"`（用户指定时覆盖）。支持 `sampling_extra` 传递 `top_k`/`repeat_penalty` 等 llama.cpp 扩展参数。 |
+| `convert_messages()` | 与 OpenAI 相同（API 格式兼容） |
+| `convert_tools()` | 与 OpenAI 相同 |
+| `normalize_stop_reason()` | `{"stop"→"end_turn", "length"→"max_turns", "tool_calls"→"end_turn", "content_filter"→"permission_denied"}` |
+| `classify_error()` | 429→rate_limit, 503→overloaded, 500/502→transient, 413/context→context_length, content_filter→content_filter, 401/403→fatal |
+| `stream_messages()` | 与 OpenAI 相同结构，`StreamStart.provider="llamacpp"` |
+| 重试逻辑 | 同 AnthropicClient/OpenAIClient，内联手动指数退避 |
+
+**配置**: `AgentConfig.llamacpp`（`LlamaCppConfig`）控制 GPU 层数和 KV cache 量化；`AgentConfig.context_size` 传递给 server 的 `--ctx-size`。
+
+通过 `@register_client` 装饰器 + `provider: ClassVar[ModelProvider] = ModelProvider.LLAMACPP` 自动注册。
+
+---
+
 #### 3.6 错误分类 + 重试配置 (`llm/errors.py`)
 
 ```python
@@ -800,7 +888,7 @@ def retry_config_for(classify_error_fn, provider: str) -> dict:
    - 实现 4 个 classmethod + `stream_messages()`
 3. 在 `llm/__init__.py` 中添加 `from . import <provider>` 触发注册
 4. 在 `query/budget.py` 中添加该 provider 模型的上下文窗口大小
-5. （可选）在 `cli.py` 的 `_ENV_VAR_MAP` 中添加环境变量映射
+5. （可选）在 `cli/_config.py` 中添加环境变量映射
 
 ---
 
@@ -861,7 +949,7 @@ async for event in tracer.wrap(client.stream_messages(messages, tools)):
 用户 prompt
   │
   ▼
-query() ──► enrich_context() ──► 系统提示词 (日期 + git status)
+query() ──► enrich_context() ──► 系统提示词 (日期时间 + git status)
   │
   └── 每轮循环 ──► TokenBudget 检查 ──► 截断检查 ──► LLM 调用 ──►
                      │                     │              │
@@ -887,9 +975,9 @@ query() ──► enrich_context() ──► 系统提示词 (日期 + git statu
 |------|------|
 | `src/agent_core/query/loop.py` | `query()` 主循环 + 消息构建器 + 工具执行管线 |
 | `src/agent_core/query/budget.py` | `TokenBudget` 令牌预算 + 收益递减检测 + 上下文窗口感知 |
-| `src/agent_core/query/context.py` | `enrich_context()` 上下文富化（日期 + git status） |
+| `src/agent_core/query/context.py` | `enrich_context()` 上下文富化（日期时间 + git status） |
 | `src/agent_core/query/truncate.py` | `hard_truncate()` 硬截断逻辑 |
-| `src/agent_core/cli.py` | 交互式 REPL 测试入口 + 配置文件加载 |
+| `src/agent_core/cli/_main.py` | 交互式 REPL 测试入口 + 配置文件加载 |
 | `src/agent_core/__main__.py` | `python -m agent_core` 模块入口 |
 
 ---
@@ -1056,6 +1144,7 @@ def get_context_window(model_id: ModelId) -> int:
 | OpenAI | gpt-4.1 / gpt-4.1-mini | 1,000,000 |
 | OpenAI | gpt-4o | 128,000 |
 | OpenAI | o4-mini | 200,000 |
+| llamacpp | * (通配) | 由 `context_size` 配置决定（默认 8192）|
 | 未知模型 | — | 200,000 (默认) |
 
 **Token 估算 (`estimate_tokens_from_messages`)**
@@ -1101,14 +1190,14 @@ async def enrich_context(workspace_root: str | None = None) -> str:
 
 | 信息 | 来源 | 格式 |
 |------|------|------|
-| 当前日期 | `date.today().isoformat()` | `Today's date is 2026-06-15.` |
+| 当前日期+时间 | `datetime.now().isoformat(sep=' ', timespec='seconds')` | `Today's date is 2026-07-05 14:32:18.` |
 | Git 状态 | `git status --porcelain`（5s 超时） | `<git_status>...</git_status>` |
 
-失败静默吞没——git 不可用时仅返回日期，不抛异常。
+失败静默吞没——git 不可用时仅返回日期+时间，不抛异常。
 
 ---
 
-#### 4.7 CLI 交互式测试入口 (`cli.py`)
+#### 4.7 CLI 交互式测试入口 (`cli/_main.py`)
 
 **两种启动方式**
 
@@ -2039,7 +2128,7 @@ query():
 
 `_run_turns` 是纯回合循环,不持有 mcp 引用 → 它的多个提前 `return` 路径不受影响。
 
-#### 6.7 CLI 启动预检 (`cli.py`)
+#### 6.7 CLI 启动预检 (`cli/_main.py`)
 
 **`async _preflight_mcp(config: AgentConfig) → None`**
 
@@ -2901,7 +2990,7 @@ from agent_core import (
 | `src/agent_core/session/state.py` | `SessionState` 持久化生命周期（`begin/end_persistence`/`flush_new_messages`/压缩检测） |
 | `src/agent_core/agents/run.py` | sidechain 写入升级为 `TranscriptEntry` 信封（传 `session_id`/`project_hash` 时） |
 | `src/agent_core/agents/fork.py` | `_load_sidechain_messages` unwrap `.message`（兼容新信封 + 旧裸格式） |
-| `src/agent_core/cli.py` | `--resume`/`--continue` 解析 + `/sessions` 命令 + `begin/end_persistence` 接线 |
+| `src/agent_core/cli/_main.py` | `--resume`/`--continue` 解析 + `/sessions` 命令 + `begin/end_persistence` 接线 |
 
 **测试文件**:
 
@@ -3050,7 +3139,7 @@ Phase A 字段：`session_id` / `messages` / `permission_store` / `transcript_pa
 | `agents/tool.py` | `AgentTool._run_sync`/`_run_async` 透传 `context.session_id`/`project_hash` → `run_agent` |
 | `agents/run.py` | `session_id`+`project_hash` 均非空时，sidechain 用新路径 + `TranscriptEntry` 信封 |
 | `agents/fork.py` | `_load_sidechain_messages` 取 `record["message"]`（兼容旧裸格式），供 `resume_agent` |
-| `cli.py` | `--resume <id>` / `--continue` / `/sessions`；`_repl` 用 `try/finally` 保证 `end_persistence()` |
+| `cli/_main.py` | `--resume <id>` / `--continue` / `/sessions`；`_repl` 用 `try/finally` 保证 `end_persistence()` |
 
 #### 10.8 不变量 & 设计要点
 
@@ -3173,7 +3262,11 @@ agent-core/
 │       │
 │       ├── agent.py                # Agent 主类 (run / stream / on_permission_check)
 │       ├── models.py               # 所有 Pydantic 数据模型 (AgentConfig, AgentResult, AgentMessage, AgentDefinition, 等)
-│       ├── cli.py                  # 交互式 REPL 测试入口
+│       ├── cli/                  # 交互式 REPL 测试入口 + QQ Bot 命令
+│       │   ├── __init__.py         # 公开导出 main
+│       │   ├── _main.py            # 交互式 REPL
+│       │   ├── _config.py          # 配置文件加载
+│       │   └── qqbot.py            # QQ Bot 启动命令
 │       │
 │       ├── agents/                 # Agent 定义 + 执行引擎（详见第 7-8 节）
 │       │   ├── __init__.py         # 公开导出 + 触发内置 Agent 注册
@@ -3195,7 +3288,7 @@ agent-core/
 │       │   ├── __init__.py
 │       │   ├── loop.py             # query() 异步生成器 (turn 循环核心 + 工具执行管线)
 │       │   ├── budget.py           # Token 预算管理 + 收益递减检测
-│       │   ├── context.py          # 上下文富化 (git status, 日期)
+│       │   ├── context.py          # 上下文富化 (git status, 日期时间)
 │       │   └── truncate.py         # 硬截断逻辑
 │       │
 │       ├── tools/                  # 工具系统
@@ -3208,7 +3301,9 @@ agent-core/
 │       │   ├── file_write.py       # FileWriteTool (Write)
 │       │   ├── glob_tool.py        # GlobTool (Glob)
 │       │   ├── grep_tool.py        # GrepTool (Grep)
-│       │   └── bash.py             # BashTool (Bash)
+│       │   ├── bash.py             # BashTool (Bash)
+│       │   ├── web_fetch.py         # WebFetchTool (WebFetch)
+│       │   └── web_search.py        # WebSearchTool (WebSearch)
 │       │
 │       ├── permissions/            # 权限系统
 │       │   ├── __init__.py
@@ -3276,16 +3371,35 @@ agent-core/
 │       │   ├── registry.py         # PluginRegistry (entry_points 发现 + 手动注册)
 │       │   └── lifecycle.py        # safe_enable_plugins / safe_disable_all
 │       │
-│       ├── persistence/            # ⬜ 会话持久化 (待实现 — Item 10)
+│       ├── logging/                # 结构化日志
 │       │   ├── __init__.py
-│       │   ├── storage.py          # JSONL 读写 (aiofiles)
-│       │   ├── path.py             # 存储路径计算
-│       │   ├── session.py          # 会话列表 / 恢复 / 删除
-│       │   └── migrate.py          # 格式迁移
+│       │   ├── config.py           # LoggingConfig + RollingPolicy
+│       │   ├── events.py           # LogRecord 数据模型
+│       │   ├── path.py             # 日志文件路径
+│       │   ├── reader.py           # 日志加载/导出/聚合
+│       │   ├── recorder.py         # ConversationRecorder
+│       │   ├── redact.py           # 敏感信息脱敏
+│       │   ├── sink.py             # JsonlLogSink/LogSink/NullSink
+│       │   └── tracer.py           # TurnTracer 结构化日志记录器
 │       │
-│       └── logging/                # 结构化日志
-│           ├── __init__.py
-│           └── tracer.py           # TurnTracer 结构化日志记录器
+│       ├── benchmarks/             # Agent 评测框架
+│       │   └── swebench/           # SWE-Bench Pro 评测
+│       │       ├── cli.py          # CLI 入口
+│       │       ├── config.py       # 评测配置
+│       │       ├── dataset.py      # 数据集加载
+│       │       ├── patch.py        # Patch 生成
+│       │       ├── prompt.py       # Prompt 构建
+│       │       └── runner.py       # 评测运行器
+│       │
+│       ├── bridge/                 # Agent Bridge — 跨 Agent 通信
+│       │   ├── agent_bridge.py     # Bridge 协议处理
+│       │   └── text_splitter.py    # 长文本分片
+│       │
+│       └── channels/               # IM 频道适配器
+│           └── qq_bot/             # QQ Bot 频道
+│               ├── channel.py      # 频道主逻辑
+│               ├── client.py       # QQ Bot API 客户端
+│               └── types.py        # 类型定义
 │
 ├── tests/
 │   ├── __init__.py

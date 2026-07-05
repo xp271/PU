@@ -45,7 +45,7 @@ from ..tools.registry import registered_tools
 
 _DEEPSEEK_STOP_MAP: dict[str, str] = {
     "stop": "end_turn",
-    "length": "max_turns",
+    "length": "output_truncated",
     "tool_calls": "end_turn",
     "content_filter": "permission_denied",
 }

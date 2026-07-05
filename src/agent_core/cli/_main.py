@@ -28,188 +28,38 @@ Missing api_keys fall back to environment variables
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any
 
-from .agent import Agent
-from .mcp.client import McpSessionManager
-from .models import AgentConfig, ModelId, ModelProvider
-from .permissions import PermissionOutcome
-from .session import SessionState
+from ..agent import Agent
+from ..mcp.client import McpSessionManager
+from ..models import AgentConfig, ModelId, ModelProvider
+from ..permissions import PermissionOutcome
+from ..session import SessionState
+from ._config import _find_config_file, _load_config
 
 # ---------------------------------------------------------------------------
-# Config file resolution
+# Display helpers
 # ---------------------------------------------------------------------------
 
-_ENV_VAR_MAP: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "llamacpp": "LLAMACPP_API_KEY",
-}
 
-
-def _find_config_file() -> Path | None:
-    """Locate the first existing config file in priority order.
-
-    1. ``$AGENT_CORE_CONFIG`` environment variable (absolute path)
-    2. ``./agent-core.config.json`` (current working directory)
-    3. ``{package_root}/agent-core.config.json`` (resolved via ``__file__``;
-       works for editable installs where the package lives inside the project)
-    4. ``~/.agent-core/config.json`` (user home)
-    """
-    candidates: list[Path] = []
-
-    override = os.environ.get("AGENT_CORE_CONFIG")
-    if override:
-        candidates.append(Path(override).expanduser().resolve())
-
-    candidates.append(Path("agent-core.config.json").resolve())
-
-    # Search relative to the package install location.
-    # For editable installs (``pip install -e .``) this resolves to the
-    # project root (e.g. ``C:\\PU``).  For regular installs it falls
-    # through silently when no config is found.
-    _pkg_root = Path(__file__).resolve().parent.parent.parent
-    candidates.append(_pkg_root / "agent-core.config.json")
-
-    candidates.append(Path.home() / ".agent-core" / "config.json")
-
-    for p in candidates:
-        if p.is_file():
-            return p
-    return None
-
-
-# -- MCP config loading helpers ----------------------------------------------
-
-
-_ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-
-
-def _expand_env_vars(obj: Any) -> Any:
-    """Recursively expand ``${ENV_VAR}`` placeholders."""
-
-    def _sub(m: Any) -> str:
-        var = m.group(1)
-        if var not in os.environ:
-            raise KeyError(
-                f"Environment variable '{var}' referenced in .mcp.json is not set"
-            )
-        return os.environ[var]
-
-    if isinstance(obj, str):
-        return _ENV_PLACEHOLDER.sub(_sub, obj)
-    if isinstance(obj, list):
-        return [_expand_env_vars(v) for v in obj]
+def _summarise(obj: object) -> str:
+    """Compact representation of a tool input dict."""
     if isinstance(obj, dict):
-        return {k: _expand_env_vars(v) for k, v in obj.items()}
-    return obj
+        parts = []
+        for k, v in obj.items():
+            parts.append(f"{k}={_ellipsis(str(v), 40)}")
+        return "{" + ", ".join(parts) + "}"
+    return str(obj)
 
 
-def _load_mcp_servers_raw() -> dict[str, Any]:
-    """Load MCP servers from file chain: ~/.agent/mcp.json → .mcp.json."""
-    servers: dict[str, Any] = {}
-
-    # 1. User-level
-    user_mcp = Path.home() / ".agent" / "mcp.json"
-    if user_mcp.is_file():
-        try:
-            raw = json.loads(user_mcp.read_text(encoding="utf-8"))
-            servers.update(raw.get("mcpServers", {}))
-        except (json.JSONDecodeError, OSError) as exc:
-            print(f"[config] failed to read {user_mcp}: {exc}", file=sys.stderr)
-
-    # 2. Project-level (overrides same-named entries)
-    project_mcp = Path(".mcp.json").resolve()
-    if project_mcp.is_file():
-        try:
-            raw = json.loads(project_mcp.read_text(encoding="utf-8"))
-            servers.update(raw.get("mcpServers", {}))
-        except (json.JSONDecodeError, OSError) as exc:
-            print(f"[config] failed to read {project_mcp}: {exc}", file=sys.stderr)
-
-    # Expand ${ENV_VAR} placeholders
-    try:
-        expanded = _expand_env_vars(servers)
-        if isinstance(expanded, dict):
-            servers = expanded
-    except KeyError as exc:
-        print(f"[config] {exc}", file=sys.stderr)
-
-    return servers
-
-
-def _load_config() -> AgentConfig:
-    """Build AgentConfig from config-file + env-var fallback."""
-    config_path = _find_config_file()
-    raw: dict[str, Any] = {}
-
-    if config_path is not None:
-        try:
-            raw = json.loads(config_path.read_text(encoding="utf-8"))
-            print(f"[config] {config_path}")
-        except (json.JSONDecodeError, OSError) as exc:
-            print(f"[config] failed to read {config_path}: {exc}", file=sys.stderr)
-
-    # -- api_keys: file values take precedence over env vars --
-    api_keys: dict[str, str] = raw.get("api_keys", {})
-    for provider in ModelProvider:
-        if provider.value in api_keys:
-            continue
-        env_var = _ENV_VAR_MAP.get(provider.value)
-        if env_var:
-            val = os.environ.get(env_var, "")
-            if val:
-                api_keys[provider.value] = val
-
-    model: str = raw.get("model", "anthropic/claude-sonnet-4-5")
-    max_turns: int = raw.get("max_turns", 20)
-    permission_mode: str = raw.get("permission_mode", "ask")
-
-    # -- MCP servers: code injection in config > .mcp.json files --
-    mcp_servers: dict[str, Any] = {}
-    try:
-        mcp_servers = _load_mcp_servers_raw()
-    except Exception as exc:
-        print(f"[config] MCP config load failed: {exc}", file=sys.stderr)
-    # Code injection overrides file-based config
-    mcp_servers.update(raw.get("mcp_servers", {}))
-
-    # -- Guard: refuse to start with no credentials at all --
-    # Providers that don't require authentication (e.g. local llama.cpp server).
-    _NO_AUTH_PROVIDERS = {"llamacpp"}
-    if not any(api_keys.values()):
-        provider = ModelId.parse(model).provider.value
-        if provider not in _NO_AUTH_PROVIDERS and not api_keys.get(provider):
-            env_var = _ENV_VAR_MAP.get(provider, f"{provider.upper()}_API_KEY")
-            print(
-                f"[config] ERROR: No API key found for provider '{provider}'.\n"
-                f"  Searched: {config_path or 'no config file found'}\n"
-                f"  Env var:  {env_var} (not set)\n"
-                f"\n"
-                f"  Fix: set the {env_var} environment variable, or create\n"
-                f"  ~/.agent-core/config.json with an api_keys.{provider} entry.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-    return AgentConfig(
-        model=model,
-        api_keys=api_keys,
-        max_turns=max_turns,
-        permission_mode=permission_mode,  # type: ignore[arg-type]
-        mcp_servers=mcp_servers,  # type: ignore[arg-type]
-        allow_unknown_model=raw.get("allow_unknown_model", False),
-        base_urls=raw.get("base_urls", {}),
-        context_size=raw.get("context_size"),
-        sampling=raw.get("sampling"),
-        llamacpp=raw.get("llamacpp", {}),
-    )
+def _ellipsis(text: str, max_len: int) -> str:
+    """Truncate *text* to *max_len* with an ellipsis if needed."""
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +118,7 @@ def _handle_command(config: AgentConfig, text: str) -> bool:
 
 async def _list_sessions_cmd(config: AgentConfig) -> None:
     """Print all persisted sessions for the current project."""
-    from .persistence.session import list_sessions as _pers_list
+    from ..persistence.session import list_sessions as _pers_list
 
     sessions = await _pers_list(config.workspace_root)
     if not sessions:
@@ -290,8 +140,8 @@ async def _show_logs_cmd(config: AgentConfig, session_id: str) -> None:
         print("(conversation logging is disabled — set logging.enabled=True)")
         return
 
-    from .logging.path import compute_project_hash, log_file_path
-    from .logging.reader import aggregate_metrics, load_log
+    from ..logging.path import compute_project_hash, log_file_path
+    from ..logging.reader import aggregate_metrics, load_log
 
     ph = compute_project_hash(config.workspace_root)
     path = log_file_path(
@@ -324,7 +174,7 @@ async def _show_logs_cmd(config: AgentConfig, session_id: str) -> None:
 
 def _list_skills(config: AgentConfig) -> None:
     """Print all discoverable skills to stdout."""
-    from .skills.loader import discover_skills
+    from ..skills.loader import discover_skills
 
     search_dirs: list[str] = []
     if config.skills_dir:
@@ -384,14 +234,11 @@ async def _repl(
     print(_HELP_TEXT)
     print()
 
-    # One session for the whole REPL: carries conversation history and
-    # session-remembered permission decisions across prompts.
     session = SessionState()
 
-    # ---- Session resume (Phase B) ----
     if resume_id is not None or continue_last:
-        from .persistence.session import list_sessions as _pers_list
-        from .persistence.session import load_session as _pers_load
+        from ..persistence.session import list_sessions as _pers_list
+        from ..persistence.session import load_session as _pers_load
 
         if continue_last:
             sessions = await _pers_list(config.workspace_root)
@@ -417,8 +264,7 @@ async def _repl(
                     f"[session {resume_id[:8]}... not found, starting fresh]"
                 )
 
-    # ---- Begin persistence (Phase B) ----
-    from .persistence.path import compute_project_hash, session_jsonl_path
+    from ..persistence.path import compute_project_hash, session_jsonl_path
 
     ph = compute_project_hash(config.workspace_root)
     tpath = session_jsonl_path(ph, session.session_id)
@@ -445,7 +291,6 @@ async def _repl(
                 cmd_parts = prompt.strip().split()
                 if prompt.strip() == "/clear":
                     session.clear_history()
-                    # Reset written_count too so disk doesn't diverge
                     session._written_count = len(session.messages)
                     print("[history cleared]")
                     continue
@@ -459,7 +304,6 @@ async def _repl(
                     break
                 continue
 
-            # -- Run agent with current prompt --
             agent = Agent(config, session=session)
             agent.on_permission_check(_permission_callback)
             stream = agent.stream(prompt)
@@ -471,7 +315,6 @@ async def _repl(
                         print(f"\n[{msg.tool_name}] {_summarise(msg.tool_input)}")
                     elif msg.type == "tool_result":
                         if msg.is_error:
-                            # 错误结果完整展示，方便定位问题
                             preview = _ellipsis(str(msg.content), 500)
                             print(f"  -> ERR: {preview}")
                         else:
@@ -500,36 +343,10 @@ async def _repl(
             except Exception as exc:
                 print(f"\n[exception] {type(exc).__name__}: {exc}")
             finally:
-                # Close the stream (and its MCP sessions) in THIS task, even if the
-                # loop was abandoned via exception — never at asyncio.run() shutdown
-                # in a different task (anyio cancel-scope requirement).
                 await stream.aclose()
-                # §Item 12: drain this prompt's conversation-log sink (no-op
-                # when logging is disabled).
                 await agent.aclose()
     finally:
         await session.end_persistence()
-
-
-# ---------------------------------------------------------------------------
-# Display helpers
-# ---------------------------------------------------------------------------
-
-def _summarise(obj: object) -> str:
-    """Compact representation of a tool input dict."""
-    if isinstance(obj, dict):
-        parts = []
-        for k, v in obj.items():
-            parts.append(f"{k}={_ellipsis(str(v), 40)}")
-        return "{" + ", ".join(parts) + "}"
-    return str(obj)
-
-
-def _ellipsis(text: str, max_len: int) -> str:
-    """Truncate *text* to *max_len* with an ellipsis if needed."""
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 1] + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -537,19 +354,7 @@ def _ellipsis(text: str, max_len: int) -> str:
 # ---------------------------------------------------------------------------
 
 async def _preflight_mcp(config: AgentConfig) -> None:
-    """Connect to every configured MCP server once, at startup.
-
-    This triggers any ``npx -y`` package download and verifies the
-    handshake *before* the REPL accepts input — so the first real query
-    isn't blocked on a cold download, and an unreachable/broken server
-    surfaces immediately instead of mid-query.
-
-    Sessions are closed again right away: each ``query()`` opens its own
-    (the manager is query-scoped, and connect/aclose must run in the same
-    task).  The win here is warming the npx cache + reporting status.
-    ``connect()`` and ``aclose()`` run in this single ``asyncio.run`` task,
-    satisfying the anyio same-task requirement.
-    """
+    """Connect to every configured MCP server once, at startup."""
     if not config.mcp_servers:
         return
 
@@ -559,7 +364,7 @@ async def _preflight_mcp(config: AgentConfig) -> None:
         for name, server_config in config.mcp_servers.items():
             try:
                 state = await mcp.connect(name, server_config)
-            except Exception as exc:  # defensive: never block startup
+            except Exception as exc:
                 print(f"[mcp]   x {name}: {exc}", file=sys.stderr)
                 continue
             if state.connection_error is None:
@@ -577,24 +382,14 @@ async def _preflight_mcp(config: AgentConfig) -> None:
 # LLM server preflight (llama.cpp auto-start)
 # ---------------------------------------------------------------------------
 
-_LLAMACPP_SERVER_EXE = Path(__file__).resolve().parent.parent.parent / "llama.cpp" / "llama-server.exe"
-_LLAMACPP_MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "llama.cpp" / "models"
-_LLAMACPP_HEALTH_URL = "http://127.0.0.1:8080/v1/models"
+_LLAMACPP_SERVER_EXE = Path(__file__).resolve().parent.parent.parent.parent / "llama.cpp" / "llama-server.exe"
+_LLAMACPP_MODELS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "llama.cpp" / "models"
 
 
 async def _preflight_llamacpp(
     config: AgentConfig,
 ) -> "Callable[[], Awaitable[None]] | None":
-    """Ensure the llama.cpp server is running before the REPL starts.
-
-    1. Resolve the model name from config → GGUF file path.
-    2. Health-check the configured base_url.
-    3. If unreachable, spawn ``llama-server.exe`` with ``-m`` (single-model mode).
-    4. Poll until ready (timeout 120 s — large models take time to load).
-
-    Returns a shutdown async callable if the server was auto-started by
-    this process; returns ``None`` if it was already running.
-    """
+    """Ensure the llama.cpp server is running before the REPL starts."""
     try:
         model_id = config.model_id
     except ValueError:
@@ -604,7 +399,6 @@ async def _preflight_llamacpp(
 
     import asyncio
 
-    # 1. Quick check — is it already running? (raw TCP, no httpx)
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection("127.0.0.1", 8080), timeout=3.0,
@@ -620,15 +414,13 @@ async def _preflight_llamacpp(
         writer.close()
         if b"200" in response[:256]:
             print(f"[llamacpp] server already running on port 8080")
-            return
+            return None
     except Exception:
         pass
 
-    # 2. Resolve model file from config
     model_name = model_id.name
     model_path = _LLAMACPP_MODELS_DIR / f"{model_name}.gguf"
     if not model_path.is_file():
-        # Try glob match in case filename differs slightly
         candidates = list(_LLAMACPP_MODELS_DIR.glob(f"{model_name}*"))
         if candidates:
             model_path = candidates[0]
@@ -638,15 +430,14 @@ async def _preflight_llamacpp(
                 f"  Place the GGUF file in {_LLAMACPP_MODELS_DIR}/",
                 file=sys.stderr,
             )
-            return
+            return None
 
-    # 3. Not running — start in single-model mode
     if not _LLAMACPP_SERVER_EXE.is_file():
         print(
             f"[llamacpp] server not running and {_LLAMACPP_SERVER_EXE} not found.",
             file=sys.stderr,
         )
-        return
+        return None
 
     ctx_size = config.context_size or 8192
     llc = config.llamacpp
@@ -672,9 +463,8 @@ async def _preflight_llamacpp(
         )
     except OSError as exc:
         print(f"[llamacpp] failed to start server: {exc}", file=sys.stderr)
-        return
+        return None
 
-    # Drain stderr in background so the pipe buffer never blocks the server.
     _stderr_chunks: list[bytes] = []
 
     async def _drain_stderr() -> None:
@@ -687,7 +477,6 @@ async def _preflight_llamacpp(
 
     drain_task = asyncio.ensure_future(_drain_stderr())
 
-    # ---- shutdown helper (closed over proc / drain_task) ----
     async def _shutdown() -> None:
         if not drain_task.done():
             drain_task.cancel()
@@ -705,7 +494,6 @@ async def _preflight_llamacpp(
         except ProcessLookupError:
             pass
 
-    # 4. Poll until ready (raw TCP + HTTP, no httpx dependency)
     print("[llamacpp] loading model…", end="", flush=True)
     deadline = asyncio.get_event_loop().time() + 120.0
     while asyncio.get_event_loop().time() < deadline:
@@ -717,7 +505,6 @@ async def _preflight_llamacpp(
                 print(f"[llamacpp] stderr tail:\n{stderr_text}", file=sys.stderr)
             await _shutdown()
             return None
-        # Raw TCP connect + minimal HTTP GET — avoids httpx compat issues
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection("127.0.0.1", 8080), timeout=3.0,
@@ -745,7 +532,6 @@ async def _preflight_llamacpp(
         await asyncio.sleep(1.0)
         print(".", end="", flush=True)
 
-    # 5. Timeout — drain and show stderr
     drain_task.cancel()
     try:
         await drain_task
@@ -783,7 +569,6 @@ def main() -> None:
     """CLI entry point (agent-core console script)."""
     config = _load_config()
 
-    # Parse command-line arguments (simple, no argparse dependency)
     resume_id: str | None = None
     continue_last: bool = False
     args = sys.argv[1:]
@@ -798,7 +583,3 @@ def main() -> None:
         i += 1
 
     asyncio.run(_main(config, resume_id=resume_id, continue_last=continue_last))
-
-
-if __name__ == "__main__":
-    main()

@@ -86,8 +86,12 @@ class TestPartitionRounds:
         assert len(rounds[0]) == 2
         assert len(rounds[1]) == 2
 
-    def test_tool_result_user_starts_new_round(self) -> None:
-        """A tool_result user message starts a new round."""
+    def test_tool_result_stays_in_same_round(self) -> None:
+        """A tool_result-only user message does NOT start a new round.
+
+        This keeps tool_use → tool_result pairs together so they are
+        never split across compression/truncation boundaries.
+        """
         msgs = [
             _make_msg("user", _text_block("q1")),
             _make_msg("assistant", _tool_use_block("Read")),
@@ -95,9 +99,9 @@ class TestPartitionRounds:
             _make_msg("assistant", _text_block("done")),
         ]
         rounds = _partition_rounds(msgs)
-        # user(q1)+assistant(tool_use) = round 1
-        # user(tool_result)+assistant(done) = round 2
-        assert len(rounds) == 2
+        # All four messages form a single round
+        assert len(rounds) == 1
+        assert len(rounds[0]) == 4
 
     def test_consecutive_assistant_messages_stay_in_same_round(self) -> None:
         msgs = [

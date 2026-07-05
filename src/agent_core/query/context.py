@@ -16,14 +16,14 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import date
+from datetime import datetime
 
 
 async def enrich_context(workspace_root: str | None = None) -> str:
     """Collect environment context and return a plain-text block.
 
     Currently collects:
-    - Current date (ISO format)
+    - Current date and time (ISO format, precise to seconds)
     - ``git status --porcelain`` output (if cwd is inside a git repo)
 
     Returns an empty string when workspace_root is ``None`` and there is
@@ -31,8 +31,10 @@ async def enrich_context(workspace_root: str | None = None) -> str:
     """
     parts: list[str] = []
 
-    # Current date
-    parts.append(f"Today's date is {date.today().isoformat()}.")
+    # Current date & time (precise to seconds)
+    parts.append(
+        f"Today's date is {datetime.now().isoformat(sep=' ', timespec='seconds')}."
+    )
 
     # System environment
     shell = os.environ.get("COMSPEC", os.environ.get("SHELL", "unknown"))

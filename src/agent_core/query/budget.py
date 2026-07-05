@@ -36,11 +36,11 @@ _MODEL_CONTEXT_WINDOWS: dict[tuple[ModelProvider, str | None], int] = {
 
 # Provider-level defaults when the specific model name isn't in the map.
 _PROVIDER_CONTEXT_DEFAULTS: dict[ModelProvider, int] = {
-    ModelProvider.LLAMACPP: 8192,
+    ModelProvider.LLAMACPP: 32768,
 }
 
 _DEFAULT_CONTEXT_WINDOW = 200_000
-_TRUNCATION_RATIO = 0.8
+_TRUNCATION_RATIO = 0.85
 _DIMINISHING_RETURNS_THRESHOLD = 500
 _DIMINISHING_RETURNS_WINDOW = 3
 
@@ -127,6 +127,10 @@ class TokenBudget:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
 
+    # 上一轮 API 返回的实际 input_tokens（ground truth），
+    # 用于校准 needs_truncation 的启发式估算偏差。
+    last_actual_input_tokens: int = 0
+
     # -- diminishing-returns tracking --
     _last_three_deltas: list[int] = field(default_factory=list)
     _previous_output_total: int = 0
@@ -142,6 +146,8 @@ class TokenBudget:
         self.turn_count += 1
         self.total_input_tokens += input_tokens
         self.total_output_tokens += output_tokens
+
+        self.last_actual_input_tokens = input_tokens
 
         current = self.total_output_tokens
         delta = current - self._previous_output_total
@@ -173,8 +179,21 @@ class TokenBudget:
         self._last_three_deltas.clear()
 
     def needs_truncation(self, estimated_tokens: int) -> bool:
-        """True when the message history should be hard-truncated."""
-        return estimated_tokens > self.truncation_threshold
+        """True when the message history should be hard-truncated.
+
+        优先使用上一轮 API 返回的实际 input_tokens，因为它精确反映
+        真实使用量；启发式估算作为兜底（第一轮或实际值不可用时）。
+        """
+        effective = max(estimated_tokens, self.last_actual_input_tokens)
+        return effective > self.truncation_threshold
+
+    def reset_last_actual(self) -> None:
+        """压缩/截断后重置实际 token 计数。
+
+        消息列表已被裁剪后，旧的 last_actual_input_tokens 不再有效，
+        必须重置以避免下一轮误判仍需截断。
+        """
+        self.last_actual_input_tokens = 0
 
     def total_tokens(self) -> int:
         return self.total_input_tokens + self.total_output_tokens

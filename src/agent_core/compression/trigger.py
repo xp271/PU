@@ -18,19 +18,19 @@ def _partition_rounds(
 ) -> list[list[dict[str, Any]]]:
     """Split a flat message list into conversation rounds.
 
-    A *round* starts with a ``role: "user"`` message and includes zero or
-    more following ``role: "assistant"`` messages.  Tool-result user
-    messages also start new rounds.
-
-    This is the shared partitioning function used by both ``hard_truncate``
-    and ``compress``.
+    A round starts with a user message that contains actual text content
+    (not just tool results).  This ensures that a complete tool cycle
+    (assistant:tool_use → user:tool_result) stays together in the same
+    round, preventing orphaned tool messages after compression.
     """
     rounds: list[list[dict[str, Any]]] = []
     current_round: list[dict[str, Any]] = []
 
     for msg in messages:
         role = msg.get("role", "")
-        if role == "user" and current_round:
+        # Only start a new round when the user message has real text
+        # (tool_result-only messages are continuations of the current round)
+        if role == "user" and current_round and _has_user_text(msg):
             rounds.append(current_round)
             current_round = []
         current_round.append(msg)
@@ -39,6 +39,19 @@ def _partition_rounds(
         rounds.append(current_round)
 
     return rounds
+
+
+def _has_user_text(msg: dict[str, Any]) -> bool:
+    """Return True if the user message contains any text (not just tool results)."""
+    content = msg.get("content", [])
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return any(
+            isinstance(block, dict) and block.get("type") == "text"
+            for block in content
+        )
+    return False
 
 
 def can_compress(
