@@ -232,3 +232,73 @@ class TestWorkspaceCommand:
 
         content = mock_api.post_c2c_message.call_args.kwargs["content"]
         assert "未设置" in content
+
+    # ------------------------------------------------------------------
+    # Plan §6 item 11: full /workspace → Agent integration
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_full_workspace_flow_to_agent(self, channel: "QQBotChannel"):
+        """/workspace 切换后，下一条正常消息应使用覆盖后的 workspace_root。"""
+        import os, tempfile
+        mock_api = AsyncMock()
+        channel._client = MagicMock()
+        channel._client.api = mock_api
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Step 1: switch workspace
+            await channel.handle_message("u1", "c2c", f"/workspace {tmpdir}", "text")
+            session = channel._bridge.get_session("u1", "c2c")
+            expected = os.path.abspath(tmpdir)
+            assert session.workspace_override == expected
+            assert session.messages == []
+
+            # Step 2: send normal message — verify Agent receives override
+            mock_agent = _make_mock_agent(["ok"])
+            with patch("agent_core.bridge.agent_bridge.Agent", return_value=mock_agent) as mock_cls:
+                await channel.handle_message("u1", "c2c", "hello", "text")
+
+                call_args = mock_cls.call_args
+                passed_config = call_args[0][0]
+                assert passed_config.workspace_root == expected
+
+    # ------------------------------------------------------------------
+    # Boundary: relative path → abs
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_workspace_relative_path_to_absolute(self, channel: "QQBotChannel"):
+        """/workspace 相对路径应被 os.path.abspath() 转为绝对路径。"""
+        import os
+        mock_api = AsyncMock()
+        channel._client = MagicMock()
+        channel._client.api = mock_api
+
+        await channel.handle_message("u1", "c2c", "/workspace ..", "text")
+
+        session = channel._bridge.get_session("u1", "c2c")
+        assert session.workspace_override == os.path.abspath("..")
+        assert os.path.isabs(session.workspace_override)
+
+    # ------------------------------------------------------------------
+    # Boundary: independent workspace per user in same channel
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_workspace_independent_per_user(self, channel: "QQBotChannel"):
+        """同一群聊中不同用户有独立的 workspace_override。"""
+        import os, tempfile
+        mock_api = AsyncMock()
+        channel._client = MagicMock()
+        channel._client.api = mock_api
+
+        with tempfile.TemporaryDirectory() as t1, tempfile.TemporaryDirectory() as t2:
+            await channel.handle_message("u1", "groupX", f"/workspace {t1}", "text")
+            await channel.handle_message("u2", "groupX", f"/workspace {t2}", "text")
+
+            s1 = channel._bridge.get_session("u1", "groupX")
+            s2 = channel._bridge.get_session("u2", "groupX")
+
+            assert s1.workspace_override == os.path.abspath(t1)
+            assert s2.workspace_override == os.path.abspath(t2)
+            assert s1.workspace_override != s2.workspace_override
