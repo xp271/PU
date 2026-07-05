@@ -84,6 +84,14 @@ class AgentBridge:
         self._session_locks.pop(sid, None)
         self._sessions_last_access.pop(sid, None)
 
+    def get_session(self, user_id: str, open_kfid: str) -> "SessionState":
+        """获取或创建指定用户的 SessionState（公开接口）。
+
+        Channel 层可通过此方法访问 session，例如设置 workspace_override。
+        """
+        sid = self.session_id(user_id, open_kfid)
+        return self._get_or_create_session(sid)
+
     # ------------------------------------------------------------------
     # 消息处理
     # ------------------------------------------------------------------
@@ -105,7 +113,16 @@ class AgentBridge:
 
         async with lock:
             prompt = self._build_prompt(content, msg_type)
-            agent = Agent(self._base, session=session)
+
+            # --- dynamic workspace override ---
+            effective_config = self._base
+            if session.workspace_override is not None:
+                effective_config = self._base.model_copy(
+                    update={"workspace_root": session.workspace_override}
+                )
+            # ---
+
+            agent = Agent(effective_config, session=session)
 
             try:
                 collected: list[str] = []

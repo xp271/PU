@@ -108,3 +108,127 @@ class TestQQBotChannel:
         channel._config.app_id = ""
         with pytest.raises(ValueError):
             await channel.start()
+
+
+class TestWorkspaceCommand:
+    """QQBotChannel._handle_workspace_command 测试。"""
+
+    @pytest.mark.asyncio
+    async def test_workspace_no_arg_shows_current(self, channel: "QQBotChannel"):
+        """无参数 /workspace 显示当前工作目录。"""
+        mock_api = AsyncMock()
+        channel._client = MagicMock()
+        channel._client.api = mock_api
+        channel._agent_config.workspace_root = "C:\\PU"
+
+        await channel.handle_message("u1", "c2c", "/workspace", "text")
+
+        mock_api.post_c2c_message.assert_called_once()
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "C:\\PU" in content
+
+    @pytest.mark.asyncio
+    async def test_workspace_shows_override_when_set(self, channel: "QQBotChannel"):
+        """/workspace 应优先显示 workspace_override。"""
+        mock_api = AsyncMock()
+        channel._client = MagicMock()
+        channel._client.api = mock_api
+        channel._agent_config.workspace_root = "C:\\PU"
+        session = channel._bridge.get_session("u1", "c2c")
+        session.workspace_override = "D:\\other"
+
+        await channel.handle_message("u1", "c2c", "/workspace", "text")
+
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "D:\\other" in content
+
+    @pytest.mark.asyncio
+    async def test_workspace_switch_success(self, channel: "QQBotChannel"):
+        """/workspace <path> 切换并清空历史。"""
+        import os, tempfile
+        mock_api = AsyncMock()
+        channel._client = MagicMock()
+        channel._client.api = mock_api
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            await channel.handle_message("u1", "c2c", f"/workspace {tmpdir}", "text")
+
+            session = channel._bridge.get_session("u1", "c2c")
+            assert session.workspace_override == os.path.abspath(tmpdir)
+            assert session.messages == []
+
+            content = mock_api.post_c2c_message.call_args.kwargs["content"]
+            assert "已切换至" in content
+
+    @pytest.mark.asyncio
+    async def test_workspace_switch_dir_not_exist(self, channel: "QQBotChannel"):
+        """/workspace 不存在的目录应报错，session 不变。"""
+        mock_api = AsyncMock()
+        channel._client = MagicMock()
+        channel._client.api = mock_api
+
+        await channel.handle_message("u1", "c2c", "/workspace Z:/does_not_exist", "text")
+
+        session = channel._bridge.get_session("u1", "c2c")
+        assert session.workspace_override is None
+
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "不存在" in content
+
+    @pytest.mark.asyncio
+    async def test_workspace_reset(self, channel: "QQBotChannel"):
+        """/workspace --reset 清除 override。"""
+        mock_api = AsyncMock()
+        channel._client = MagicMock()
+        channel._client.api = mock_api
+        channel._agent_config.workspace_root = "C:\\PU"
+        session = channel._bridge.get_session("u1", "c2c")
+        session.workspace_override = "D:\\other"
+
+        await channel.handle_message("u1", "c2c", "/workspace --reset", "text")
+
+        assert session.workspace_override is None
+        assert session.messages == []
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "已重置" in content
+
+    @pytest.mark.asyncio
+    async def test_workspace_switch_disabled(self, channel: "QQBotChannel"):
+        """allow_workspace_switch=False 时返回错误。"""
+        mock_api = AsyncMock()
+        channel._client = MagicMock()
+        channel._client.api = mock_api
+        channel._config.allow_workspace_switch = False
+
+        await channel.handle_message("u1", "c2c", "/workspace D:\\test", "text")
+
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "未启用" in content
+
+    @pytest.mark.asyncio
+    async def test_workspace_group_chat(self, channel: "QQBotChannel"):
+        """/workspace 在群聊中也正常工作。"""
+        import os, tempfile
+        mock_api = AsyncMock()
+        channel._client = MagicMock()
+        channel._client.api = mock_api
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            await channel.handle_message("u1", "group123", f"/workspace {tmpdir}", "text")
+
+            mock_api.post_group_message.assert_called_once()
+            content = mock_api.post_group_message.call_args.kwargs["content"]
+            assert "已切换至" in content
+
+    @pytest.mark.asyncio
+    async def test_workspace_no_agent_config_ws(self, channel: "QQBotChannel"):
+        """/workspace 无参数且 agent_config.workspace_root 为 None 时显示提示。"""
+        mock_api = AsyncMock()
+        channel._client = MagicMock()
+        channel._client.api = mock_api
+        channel._agent_config.workspace_root = None
+
+        await channel.handle_message("u1", "c2c", "/workspace", "text")
+
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "未设置" in content

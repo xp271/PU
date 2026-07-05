@@ -39,9 +39,10 @@ class QQBotChannel:
         self._client: QQBotClient | None = None
 
         base_agent_config = _load_global_agent_config()
+        self._agent_config = config.to_agent_config(base_agent_config)
         from agent_core.bridge.agent_bridge import AgentBridge
         self._bridge = AgentBridge(
-            config.to_agent_config(base_agent_config),
+            self._agent_config,
             system_prompt=config.system_prompt,
         )
 
@@ -83,6 +84,12 @@ class QQBotChannel:
         self, user_id: str, channel_id: str, content: str, msg_type: str,
     ) -> None:
         """处理一条用户消息 → Agent 推理 → 回复。"""
+        # --- workspace 切换指令（在 Agent 处理之前） ---
+        if content.startswith("/workspace"):
+            await self._handle_workspace_command(user_id, channel_id, content)
+            return
+        # ---
+
         try:
             replies = await self._bridge.process(
                 user_id, channel_id, content, msg_type
@@ -99,3 +106,65 @@ class QQBotChannel:
                 await api.post_c2c_message(openid=user_id, msg_type=0, content=text)
             else:
                 await api.post_group_message(group_openid=channel_id, msg_type=0, content=text)
+    async def _handle_workspace_command(
+        self, user_id: str, channel_id: str, content: str,
+    ) -> None:
+        """处理 /workspace 指令：查看、切换或重置工作目录。"""
+        import os
+
+        if not self._config.allow_workspace_switch:
+            await self._send_message(
+                user_id, channel_id, "工作目录切换功能未启用。"
+            )
+            return
+
+        session = self._bridge.get_session(user_id, channel_id)
+        arg = content[len("/workspace"):].strip()
+
+        if not arg:
+            current = (
+                session.workspace_override
+                or self._agent_config.workspace_root
+                or "未设置（无限制）"
+            )
+            await self._send_message(
+                user_id, channel_id, f"当前工作目录: {current}"
+            )
+            return
+
+        if arg == "--reset":
+            session.workspace_override = None
+            session.clear_history()
+            default = self._agent_config.workspace_root or "未设置"
+            await self._send_message(
+                user_id, channel_id,
+                f"工作目录已重置为默认: {default}\n对话历史已重置。"
+            )
+            return
+
+        new_path = os.path.abspath(arg)
+        if not os.path.isdir(new_path):
+            await self._send_message(
+                user_id, channel_id, f"目录不存在: {new_path}"
+            )
+            return
+
+        session.workspace_override = new_path
+        session.clear_history()
+        await self._send_message(
+            user_id, channel_id,
+            f"工作目录已切换至: {new_path}\n对话历史已重置。"
+        )
+
+    async def _send_message(
+        self, user_id: str, channel_id: str, content: str,
+    ) -> None:
+        """发送一条文本消息到 C2C 或群聊。"""
+        api = self._client.api if self._client is not None else None
+        if api is None:
+            return
+        if channel_id == "c2c":
+            await api.post_c2c_message(openid=user_id, msg_type=0, content=content)
+        else:
+            await api.post_group_message(group_openid=channel_id, msg_type=0, content=content)
+

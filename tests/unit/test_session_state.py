@@ -57,6 +57,23 @@ def test_clear_history_keeps_permission_memory():
     assert s.permission_store.rules()  # permissions survive /clear
 
 
+def test_workspace_override_default():
+    """workspace_override defaults to None."""
+    s = SessionState()
+    assert s.workspace_override is None
+
+
+def test_clear_history_resets_written_count():
+    """clear_history() also resets _written_count to 0."""
+    s = SessionState()
+    s._written_count = 5
+    s.messages.append({"role": "user", "content": "hi"})
+    s.clear_history()
+    assert s.messages == []
+    assert s._written_count == 0
+
+
+
 # ---------------------------------------------------------------------------
 # Phase B: persistence lifecycle (Item 10)
 # ---------------------------------------------------------------------------

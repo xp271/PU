@@ -164,3 +164,76 @@ class TestProcess:
         result = await bridge.process("u1", "ch1", "test", "text")
         assert len(result) == 2
         assert all(len(c) <= 1900 for c in result)
+
+
+class TestGetSession:
+    """AgentBridge.get_session() 公开接口测试。"""
+
+    @pytest.mark.asyncio
+    async def test_get_session_creates(self, bridge: AgentBridge):
+        """get_session() 首次调用创建新 session。"""
+        s = bridge.get_session("u1", "ch1")
+        assert s is not None
+        assert s.messages == []
+
+    @pytest.mark.asyncio
+    async def test_get_session_reuses(self, bridge: AgentBridge):
+        """get_session() 重复调用返回同一个 session。"""
+        s1 = bridge.get_session("u1", "ch1")
+        s2 = bridge.get_session("u1", "ch1")
+        assert s1 is s2
+
+    @pytest.mark.asyncio
+    async def test_get_session_independent_users(self, bridge: AgentBridge):
+        """不同用户有独立的 session。"""
+        s1 = bridge.get_session("u1", "ch1")
+        s2 = bridge.get_session("u2", "ch1")
+        assert s1 is not s2
+
+
+class TestWorkspaceOverride:
+    """AgentBridge.process() 中 workspace_override 的测试。"""
+
+    @pytest.mark.asyncio
+    async def test_process_uses_workspace_override(self, bridge: AgentBridge, mock_agent_cls):
+        """session.workspace_override 非 None 时，Agent 收到覆盖后的 config。"""
+        mock_agent_cls.return_value = _make_mock_agent(["ok"])
+        session = bridge.get_session("u1", "ch1")
+        session.workspace_override = "D:\\test_ws"
+
+        await bridge.process("u1", "ch1", "test", "text")
+
+        # 验证传入 Agent 的 config.workspace_root 是覆盖后的值
+        call_args = mock_agent_cls.call_args
+        passed_config = call_args[0][0]  # first positional arg = AgentConfig
+        assert passed_config.workspace_root == "D:\\test_ws"
+
+    @pytest.mark.asyncio
+    async def test_process_no_override_no_change(self, bridge: AgentBridge, mock_agent_cls):
+        """session.workspace_override 为 None 时，Agent 使用原始 config。"""
+        mock_agent_cls.return_value = _make_mock_agent(["ok"])
+
+        await bridge.process("u1", "ch1", "test", "text")
+
+        call_args = mock_agent_cls.call_args
+        passed_config = call_args[0][0]
+        # Should be the same as self._base (original, not overwritten)
+        assert passed_config is bridge._base
+
+    @pytest.mark.asyncio
+    async def test_process_override_reset(self, bridge: AgentBridge, mock_agent_cls):
+        """workspace_override 设为 None 后恢复使用原始 config。"""
+        mock_agent_cls.return_value = _make_mock_agent(["ok"])
+        session = bridge.get_session("u1", "ch1")
+        session.workspace_override = "D:\\test_ws"
+
+        await bridge.process("u1", "ch1", "test", "text")
+        assert mock_agent_cls.call_args[0][0].workspace_root == "D:\\test_ws"
+
+        # Reset
+        session.workspace_override = None
+        mock_agent_cls.reset_mock()
+        mock_agent_cls.return_value = _make_mock_agent(["ok2"])
+
+        await bridge.process("u1", "ch1", "test2", "text")
+        assert mock_agent_cls.call_args[0][0] is bridge._base

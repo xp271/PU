@@ -60,6 +60,14 @@ class SessionState:
     ``load_session`` on resume so ``segment_index`` keeps increasing across
     sessions instead of restarting at 1."""
 
+    workspace_override: str | None = None
+    """QQBot can dynamically set workspace override.
+
+    When non-None, Agent creation uses this instead of config.workspace_root.
+    CLI/REPL never sets this field, so existing behavior is unaffected.
+    Not persisted -- restored to config.workspace_root on QQBot restart.
+    """
+
     # ------------------------------------------------------------------
     # In-memory history (Phase A)
     # ------------------------------------------------------------------
@@ -84,6 +92,7 @@ class SessionState:
         """Drop conversation history (e.g. a ``/clear`` command). Permission
         memory is left intact."""
         self.messages = []
+        self._written_count = 0
 
     # ------------------------------------------------------------------
     # Phase B: persistence lifecycle

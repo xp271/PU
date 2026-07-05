@@ -39,6 +39,10 @@ class QQBotConfig(BaseModel):
     system_prompt: str | None = Field(default=None)
     tools: list[str] = Field(default_factory=lambda: ["*"])
     workspace_root: str | None = Field(default=None)
+    allow_workspace_switch: bool = Field(
+        default=True,
+        description="允许 QQBot 用户在对话中通过 /workspace 切换工作目录",
+    )
     api_keys: dict[str, str] = Field(default_factory=dict)
     base_urls: dict[str, str] = Field(default_factory=dict)
 
