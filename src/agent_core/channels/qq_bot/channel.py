@@ -12,7 +12,6 @@ from typing import Any
 from agent_core.models import AgentConfig
 
 from .client import QQBotClient
-from .sender import MessageSender
 from .types import QQBotConfig
 
 logger = logging.getLogger("agent_core.qq_bot.channel")
@@ -38,7 +37,6 @@ class QQBotChannel:
     def __init__(self, config: QQBotConfig) -> None:
         self._config = config
         self._client: QQBotClient | None = None
-        self._sender: MessageSender | None = None
 
         base_agent_config = _load_global_agent_config()
         from agent_core.bridge.agent_bridge import AgentBridge
@@ -67,7 +65,6 @@ class QQBotChannel:
             _asyncio.set_event_loop(_loop)
             client = QQBotClient(self)
             self._client = client
-            self._sender = MessageSender(client.api)
             _loop.run_until_complete(client.start(
                 self._config.app_id, self._config.app_secret
             ))
@@ -94,13 +91,11 @@ class QQBotChannel:
             logger.exception(f"AgentBridge.process error for user {user_id}")
             replies = ["处理出错，请稍后再试。"]
 
-        sender = self._sender
-        if sender is None and self._client is not None:
-            sender = MessageSender(self._client.api)
+        api = self._client.api if self._client is not None else None
         for text in replies:
-            if sender is None:
+            if api is None:
                 continue
             if channel_id == "c2c":
-                await sender.send_c2c_text(user_id, text)
+                await api.post_c2c_message(openid=user_id, msg_type=0, content=text)
             else:
-                await sender.send_group_text(channel_id, text)
+                await api.post_group_message(group_openid=channel_id, msg_type=0, content=text)
