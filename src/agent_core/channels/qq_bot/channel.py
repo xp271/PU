@@ -7,6 +7,7 @@ botpy 封装了 WebSocket 连接和 AccessToken 管理。
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from agent_core.models import AgentConfig
@@ -15,6 +16,18 @@ from .client import QQBotClient
 from .types import QQBotConfig
 
 logger = logging.getLogger("agent_core.qq_bot.channel")
+
+# ---------------------------------------------------------------------------
+# 帮助文本
+# ---------------------------------------------------------------------------
+
+_QQBOT_HELP = """\
+QQBot 可用指令:
+  /cd [路径]      切换工作目录（支持相对/绝对路径，.. 返回上级）
+  /cd --reset     重置为默认工作目录
+  /ls [路径]      列出目录内容（一级，可选子路径）
+  /clear          清除对话历史
+  /help           显示此帮助"""
 
 
 def _load_global_agent_config() -> AgentConfig | None:
@@ -83,12 +96,15 @@ class QQBotChannel:
     async def handle_message(
         self, user_id: str, channel_id: str, content: str, msg_type: str,
     ) -> None:
-        """处理一条用户消息 → Agent 推理 → 回复。"""
-        # --- workspace 切换指令（在 Agent 处理之前） ---
-        if content.startswith("/workspace"):
-            await self._handle_workspace_command(user_id, channel_id, content)
+        """处理一条用户消息 → Agent 推理 → 回复。
+
+        以 ``/`` 开头的消息在进入 Agent 之前被拦截为 shell 指令。
+        """
+        stripped = content.strip()
+
+        if stripped.startswith("/"):
+            await self._dispatch_command(user_id, channel_id, stripped)
             return
-        # ---
 
         try:
             replies = await self._bridge.process(
@@ -106,55 +122,220 @@ class QQBotChannel:
                 await api.post_c2c_message(openid=user_id, msg_type=0, content=text)
             else:
                 await api.post_group_message(group_openid=channel_id, msg_type=0, content=text)
-    async def _handle_workspace_command(
+
+    # ------------------------------------------------------------------
+    # 指令路由
+    # ------------------------------------------------------------------
+
+    async def _dispatch_command(
         self, user_id: str, channel_id: str, content: str,
     ) -> None:
-        """处理 /workspace 指令：查看、切换或重置工作目录。"""
-        import os
-
-        if not self._config.allow_workspace_switch:
+        """将 shell 指令分发到对应处理器。"""
+        if content.startswith("/cd"):
+            await self._handle_cd_command(user_id, channel_id, content)
+        elif content.startswith("/ls"):
+            await self._handle_ls_command(user_id, channel_id, content)
+        elif content == "/clear":
+            await self._handle_clear_command(user_id, channel_id)
+        elif content == "/help":
+            await self._handle_help_command(user_id, channel_id)
+        else:
+            cmd = content.split()[0]
             await self._send_message(
-                user_id, channel_id, "工作目录切换功能未启用。"
+                user_id, channel_id,
+                f"未知指令: {cmd}。输入 /help 查看可用指令。",
+            )
+
+    # ------------------------------------------------------------------
+    # 路径解析
+    # ------------------------------------------------------------------
+
+    def _resolve_path(
+        self, user_id: str, channel_id: str, arg: str,
+    ) -> tuple[str | None, str | None]:
+        """解析相对于当前 effective workspace 的路径。
+
+        Returns:
+            (resolved_path, error_msg)
+
+            - error_msg 非 None → 路径不合法，resolved_path 为 None
+            - arg 为空字符串 → 返回 (effective, None)，调用方决定行为
+        """
+        session = self._bridge.get_session(user_id, channel_id)
+        effective = (
+            session.workspace_override
+            or self._agent_config.workspace_root
+            or os.getcwd()
+        )
+
+        if not arg:
+            return effective, None
+
+        if os.path.isabs(arg):
+            target = os.path.abspath(arg)
+        else:
+            if effective is None:
+                return None, "无法解析相对路径：当前工作目录未设置"
+            target = os.path.abspath(os.path.join(effective, arg))
+
+        # 安全检查：不能超出原始 workspace_root
+        original_root = self._agent_config.workspace_root
+        if original_root is not None:
+            root_norm = os.path.normpath(original_root)
+            target_norm = os.path.normpath(target)
+            if not (target_norm == root_norm
+                    or target_norm.startswith(root_norm + os.sep)):
+                return None, f"无法切换到工作空间外的目录: {target}"
+
+        if not os.path.isdir(target):
+            return None, f"目录不存在: {target}"
+
+        return target, None
+
+    # ------------------------------------------------------------------
+    # /cd
+    # ------------------------------------------------------------------
+
+    async def _handle_cd_command(
+        self, user_id: str, channel_id: str, content: str,
+    ) -> None:
+        """处理 /cd 指令：查看、切换或重置工作目录。"""
+        if not self._config.allow_shell_commands:
+            await self._send_message(
+                user_id, channel_id, "Shell 指令功能未启用。",
             )
             return
 
         session = self._bridge.get_session(user_id, channel_id)
-        arg = content[len("/workspace"):].strip()
+        arg = content[len("/cd"):].strip()
 
+        # 无参：显示当前
         if not arg:
-            current = (
+            effective = (
                 session.workspace_override
                 or self._agent_config.workspace_root
-                or "未设置（无限制）"
+                or os.getcwd()
             )
+            suffix = ""
+            if (session.workspace_override is None
+                    and self._agent_config.workspace_root is None):
+                suffix = " (默认)"
             await self._send_message(
-                user_id, channel_id, f"当前工作目录: {current}"
+                user_id, channel_id,
+                f"当前工作目录: {effective}{suffix}",
             )
             return
 
+        # reset
         if arg == "--reset":
             session.workspace_override = None
             session.clear_history()
-            default = self._agent_config.workspace_root or "未设置"
+            default = self._agent_config.workspace_root or os.getcwd()
             await self._send_message(
                 user_id, channel_id,
-                f"工作目录已重置为默认: {default}\n对话历史已重置。"
+                f"工作目录已重置为默认: {default}\n对话历史已重置。",
             )
             return
 
-        new_path = os.path.abspath(arg)
-        if not os.path.isdir(new_path):
-            await self._send_message(
-                user_id, channel_id, f"目录不存在: {new_path}"
-            )
+        # 切换
+        new_path, err = self._resolve_path(user_id, channel_id, arg)
+        if err is not None:
+            await self._send_message(user_id, channel_id, err)
             return
 
         session.workspace_override = new_path
         session.clear_history()
         await self._send_message(
             user_id, channel_id,
-            f"工作目录已切换至: {new_path}\n对话历史已重置。"
+            f"工作目录已切换至: {new_path}\n对话历史已重置。",
         )
+
+    # ------------------------------------------------------------------
+    # /ls
+    # ------------------------------------------------------------------
+
+    async def _handle_ls_command(
+        self, user_id: str, channel_id: str, content: str,
+    ) -> None:
+        """处理 /ls 指令：列出当前 effective workspace 的一级目录。"""
+        if not self._config.allow_shell_commands:
+            await self._send_message(
+                user_id, channel_id, "Shell 指令功能未启用。",
+            )
+            return
+
+        arg = content[len("/ls"):].strip()
+        target, err = self._resolve_path(user_id, channel_id, arg)
+        if err is not None:
+            await self._send_message(user_id, channel_id, err)
+            return
+
+        try:
+            entries = sorted(
+                os.listdir(target),
+                key=lambda n: (not os.path.isdir(os.path.join(target, n)),
+                               n.lower()),
+            )
+        except OSError as exc:
+            await self._send_message(
+                user_id, channel_id, f"无法读取目录: {exc}",
+            )
+            return
+
+        if not entries:
+            await self._send_message(
+                user_id, channel_id, f"{target}\n(空目录)",
+            )
+            return
+
+        # format into columns
+        formatted: list[str] = []
+        for e in entries:
+            full = os.path.join(target, e)
+            if os.path.isdir(full):
+                formatted.append(f"📁 {e}/")
+            else:
+                formatted.append(f"📄 {e}")
+
+        col_width = max(len(f) for f in formatted) + 2
+        per_row = max(1, 60 // col_width)  # ~30 中文字宽 ≈ 60 半角
+        lines = [target]
+        limit = min(len(formatted), 50)
+        for i in range(0, limit, per_row):
+            row = "".join(
+                f.ljust(col_width) for f in formatted[i:i + per_row]
+            )
+            lines.append(row.rstrip())
+        if len(formatted) > 50:
+            lines.append(f"... 及另外 {len(formatted) - 50} 个条目")
+
+        await self._send_message(user_id, channel_id, "\n".join(lines))
+
+    # ------------------------------------------------------------------
+    # /clear
+    # ------------------------------------------------------------------
+
+    async def _handle_clear_command(
+        self, user_id: str, channel_id: str,
+    ) -> None:
+        """处理 /clear 指令：清除对话历史。"""
+        session = self._bridge.get_session(user_id, channel_id)
+        session.clear_history()
+        await self._send_message(user_id, channel_id, "对话历史已清除。")
+
+    # ------------------------------------------------------------------
+    # /help
+    # ------------------------------------------------------------------
+
+    async def _handle_help_command(
+        self, user_id: str, channel_id: str,
+    ) -> None:
+        """处理 /help 指令：显示可用指令列表。"""
+        await self._send_message(user_id, channel_id, _QQBOT_HELP)
+
+    # ------------------------------------------------------------------
+    # 发送消息
+    # ------------------------------------------------------------------
 
     async def _send_message(
         self, user_id: str, channel_id: str, content: str,
@@ -167,4 +348,3 @@ class QQBotChannel:
             await api.post_c2c_message(openid=user_id, msg_type=0, content=content)
         else:
             await api.post_group_message(group_openid=channel_id, msg_type=0, content=content)
-
