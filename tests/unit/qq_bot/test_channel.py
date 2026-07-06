@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -321,6 +322,91 @@ class TestCdCommand:
             assert s2.workspace_override == os.path.abspath(t2)
             assert s1.workspace_override != s2.workspace_override
 
+    @pytest.mark.asyncio
+    async def test_cd_multi_parent_clamped(self, channel: QQBotChannel):
+        """/cd ../../.. 多次 .. 始终被 clamp 在 workspace_root。"""
+        mock_api = _setup_mock_api(channel)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 三层嵌套：root/a/b/c
+            a = os.path.join(tmpdir, "a")
+            b = os.path.join(a, "b")
+            c = os.path.join(b, "c")
+            os.makedirs(c)
+            channel._agent_config.workspace_root = c
+
+            await channel.handle_message("u1", "c2c", "/cd ../../..", "text")
+
+            content = mock_api.post_c2c_message.call_args.kwargs["content"]
+            # 应被拒绝，因为 .. 试图跳出 workspace_root(c)
+            assert "无法切换" in content or "不存在" in content
+
+    @pytest.mark.asyncio
+    async def test_cd_to_file_not_dir(self, channel: QQBotChannel):
+        """/cd 指向文件（非目录）应报"目录不存在"。"""
+        mock_api = _setup_mock_api(channel)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fp = os.path.join(tmpdir, "readme.txt")
+            with open(fp, "w") as f:
+                f.write("hello")
+            channel._agent_config.workspace_root = tmpdir
+
+            await channel.handle_message("u1", "c2c", f"/cd {fp}", "text")
+
+            content = mock_api.post_c2c_message.call_args.kwargs["content"]
+            assert "不存在" in content
+
+    @pytest.mark.asyncio
+    async def test_cd_only_whitespace_arg(self, channel: QQBotChannel):
+        """/cd    （仅空白字符）等同于 /cd 无参，显示当前目录。"""
+        mock_api = _setup_mock_api(channel)
+        channel._agent_config.workspace_root = "C:\\PU"
+
+        await channel.handle_message("u1", "c2c", "/cd    ", "text")
+
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "C:\\PU" in content
+
+    @pytest.mark.asyncio
+    async def test_cd_prefix_match_routes_to_cd(self, channel: QQBotChannel):
+        """/cdxyz 前缀匹配被路由到 /cd 处理器，arg="xyz"。"""
+        mock_api = _setup_mock_api(channel)
+
+        # "xyz" is relative, workspace_root=None → fallback os.getcwd
+        # "xyz" dir likely doesn't exist → 目录不存在
+        await channel.handle_message("u1", "c2c", "/cdxyz", "text")
+
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        # Should NOT be "未知指令" — it's routed to cd handler
+        assert "未知指令" not in content
+
+    @pytest.mark.asyncio
+    async def test_cd_multi_switch_chain(self, channel: QQBotChannel):
+        """多次 /cd 串联，最后一次覆盖前一次。"""
+        mock_api = _setup_mock_api(channel)
+
+        with tempfile.TemporaryDirectory() as t1, tempfile.TemporaryDirectory() as t2:
+            await channel.handle_message("u1", "c2c", f"/cd {t1}", "text")
+            await channel.handle_message("u1", "c2c", f"/cd {t2}", "text")
+
+            session = channel._bridge.get_session("u1", "c2c")
+            assert session.workspace_override == os.path.abspath(t2)
+
+    @pytest.mark.asyncio
+    async def test_cd_reset_when_no_override(self, channel: QQBotChannel):
+        """/cd --reset 在无 override 时仍可执行（no-op）。"""
+        mock_api = _setup_mock_api(channel)
+        channel._agent_config.workspace_root = "C:\\PU"
+
+        await channel.handle_message("u1", "c2c", "/cd --reset", "text")
+
+        session = channel._bridge.get_session("u1", "c2c")
+        assert session.workspace_override is None
+        assert session.messages == []
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "已重置" in content
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # TestLsCommand — /ls 指令
@@ -429,6 +515,79 @@ class TestLsCommand:
             assert "及另外" in content
             assert "5 个条目" in content  # 55 - 50
 
+    @pytest.mark.asyncio
+    async def test_ls_after_cd_uses_override(self, channel: QQBotChannel):
+        """/ls 在 /cd 切换后应列出新 workspace。"""
+        mock_api = _setup_mock_api(channel)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, "after_cd_dir"))
+            # workspace_root 必须包含 tmpdir，否则 /cd 会被边界检查拒绝
+            channel._agent_config.workspace_root = os.path.dirname(tmpdir)
+
+            # 先切换
+            await channel.handle_message("u1", "c2c", f"/cd {tmpdir}", "text")
+            mock_api.post_c2c_message.reset_mock()
+
+            await channel.handle_message("u1", "c2c", "/ls", "text")
+
+            content = mock_api.post_c2c_message.call_args.kwargs["content"]
+            assert tmpdir in content
+            assert "📁 after_cd_dir/" in content
+
+    @pytest.mark.asyncio
+    async def test_ls_no_ws_root_fallback_cwd(self, channel: QQBotChannel):
+        """/ls 在 workspace_root=None 时回退到 os.getcwd()。"""
+        mock_api = _setup_mock_api(channel)
+        channel._agent_config.workspace_root = None
+
+        await channel.handle_message("u1", "c2c", "/ls", "text")
+
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        # 应显示当前工作目录路径
+        assert os.getcwd() in content
+
+    @pytest.mark.asyncio
+    async def test_ls_on_file_returns_not_exist(self, channel: QQBotChannel):
+        """/ls 指向文件（非目录）应返回"目录不存在"。"""
+        mock_api = _setup_mock_api(channel)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fp = os.path.join(tmpdir, "readme.txt")
+            with open(fp, "w") as f:
+                f.write("hello")
+            channel._agent_config.workspace_root = tmpdir
+
+            await channel.handle_message("u1", "c2c", f"/ls readme.txt", "text")
+
+            content = mock_api.post_c2c_message.call_args.kwargs["content"]
+            assert "不存在" in content
+
+    @pytest.mark.asyncio
+    async def test_ls_oserror_permission_denied(self, channel: QQBotChannel):
+        """/ls 遇到 PermissionError 等 OSError 应友好提示。"""
+        mock_api = _setup_mock_api(channel)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            channel._agent_config.workspace_root = tmpdir
+            with patch("os.listdir", side_effect=PermissionError("denied")):
+                await channel.handle_message("u1", "c2c", "/ls", "text")
+
+            content = mock_api.post_c2c_message.call_args.kwargs["content"]
+            assert "无法读取目录" in content
+
+    @pytest.mark.asyncio
+    async def test_ls_only_whitespace_arg(self, channel: QQBotChannel):
+        """/ls    （仅空白字符）等同于 /ls 无参。"""
+        mock_api = _setup_mock_api(channel)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            channel._agent_config.workspace_root = tmpdir
+            await channel.handle_message("u1", "c2c", "/ls    ", "text")
+
+            content = mock_api.post_c2c_message.call_args.kwargs["content"]
+            assert tmpdir in content
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # TestClearCommand — /clear 指令
@@ -465,6 +624,19 @@ class TestClearCommand:
         assert session.messages == []
         content = mock_api.post_c2c_message.call_args.kwargs["content"]
         assert "已清除" in content  # 不是 "未启用"
+
+    @pytest.mark.asyncio
+    async def test_clear_empty_session_idempotent(self, channel: QQBotChannel):
+        """/clear 在空 session 时幂等——不抛异常、消息为 []。"""
+        mock_api = _setup_mock_api(channel)
+        session = channel._bridge.get_session("u1", "c2c")
+        session.clear_history()  # 确保空
+
+        await channel.handle_message("u1", "c2c", "/clear", "text")
+
+        assert session.messages == []
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "已清除" in content
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -577,3 +749,221 @@ class TestAllowShellCommandsFlag:
 
         await channel.handle_message("u1", "c2c", "/help", "text")
         assert "/cd" in mock_api.post_c2c_message.call_args.kwargs["content"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TestCdCheckpoint — /cd and /cd --reset save checkpoint
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestCdCheckpoint:
+    @pytest.mark.asyncio
+    async def test_cd_saves_checkpoint(self, channel: QQBotChannel):
+        """/cd saves a checkpoint with the new workspace_override."""
+        mock_api = _setup_mock_api(channel)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            channel._agent_config.workspace_root = os.path.dirname(tmpdir)
+            await channel.handle_message("u1", "c2c", f"/cd {tmpdir}", "text")
+
+            # Verify checkpoint was saved
+            ck_key = channel._checkpoint_key("c2c:u1")
+            from agent_core.persistence.session import load_checkpoint
+            ckpt = await load_checkpoint(
+                ck_key, workspace_root=channel._agent_config.workspace_root,
+            )
+            assert ckpt is not None
+            assert ckpt["workspace_override"] == os.path.abspath(tmpdir)
+
+    @pytest.mark.asyncio
+    async def test_cd_reset_saves_checkpoint(self, channel: QQBotChannel):
+        """/cd --reset saves a checkpoint with workspace_override=null."""
+        mock_api = _setup_mock_api(channel)
+        channel._agent_config.workspace_root = "C:\\PU"
+        session = channel._bridge.get_session("u1", "c2c")
+        session.workspace_override = "D:\\other"
+
+        await channel.handle_message("u1", "c2c", "/cd --reset", "text")
+
+        ck_key = channel._checkpoint_key("c2c:u1")
+        from agent_core.persistence.session import load_checkpoint
+        ckpt = await load_checkpoint(
+            ck_key, workspace_root=channel._agent_config.workspace_root,
+        )
+        assert ckpt is not None
+        assert ckpt["workspace_override"] is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TestCheckpointKey — sanitize bridge session ID for filesystem
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestCheckpointKey:
+    def test_checkpoint_key_sanitize(self):
+        """_checkpoint_key replaces :, \\, / with _."""
+        assert QQBotChannel._checkpoint_key("c2c:user1") == "c2c_user1"
+        assert QQBotChannel._checkpoint_key("group123:user_2") == "group123_user_2"
+        assert QQBotChannel._checkpoint_key("a\\b/c:d") == "a_b_c_d"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TestSessionCreateCheckpoint — session create triggers checkpoint restore
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestSessionCreateCheckpoint:
+    @pytest.mark.asyncio
+    async def test_session_create_loads_checkpoint(self, channel: QQBotChannel):
+        """When a new session is created, workspace_override from checkpoint
+        is restored via the on_session_created callback."""
+        mock_api = _setup_mock_api(channel)
+
+        # Save a checkpoint first
+        from agent_core.persistence.session import save_checkpoint
+        s = channel._bridge.get_session("u1", "c2c")
+        s.workspace_override = "D:\\saved_ws"
+        await save_checkpoint(
+            s,
+            checkpoint_key=channel._checkpoint_key("c2c:u1"),
+            workspace_root=channel._agent_config.workspace_root,
+        )
+
+        # Clear and re-create — the on_session_created callback should
+        # restore workspace_override from checkpoint
+        channel._bridge.clear_session("u1", "c2c")
+        # Process a new message which triggers _get_or_create_session + callback
+        with patch(
+            "agent_core.bridge.agent_bridge.Agent",
+            return_value=_make_mock_agent(["ok"]),
+        ):
+            await channel.handle_message("u1", "c2c", "hello again", "text")
+
+        restored = channel._bridge.get_session("u1", "c2c")
+        assert restored.workspace_override == "D:\\saved_ws"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TestRestartCommand — /restart 指令
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestRestartCommand:
+
+    @pytest.mark.asyncio
+    async def test_restart_c2c_sends_message_then_execv(self, channel: QQBotChannel):
+        """/restart 在 C2C 中发送提示消息后调用 os.execv。"""
+        mock_api = _setup_mock_api(channel)
+
+        with patch("os.execv") as mock_execv, \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch.dict(os.environ, {}, clear=True):
+            await channel.handle_message("u1", "c2c", "/restart", "text")
+
+        mock_api.post_c2c_message.assert_called_once()
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "重启" in content
+        mock_execv.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_restart_group_sends_message(self, channel: QQBotChannel):
+        """/restart 在群聊中也发送提示消息。"""
+        mock_api = _setup_mock_api(channel)
+
+        with patch("os.execv"), \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch.dict(os.environ, {}, clear=True):
+            await channel.handle_message("u1", "group123", "/restart", "text")
+
+        mock_api.post_group_message.assert_called_once()
+        content = mock_api.post_group_message.call_args.kwargs["content"]
+        assert "重启" in content
+
+    @pytest.mark.asyncio
+    async def test_restart_unaffected_by_allow_shell_commands(self, channel: QQBotChannel):
+        """allow_shell_commands=False 时 /restart 仍可用。"""
+        mock_api = _setup_mock_api(channel)
+        channel._config.allow_shell_commands = False
+
+        with patch("os.execv"), \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch.dict(os.environ, {}, clear=True):
+            await channel.handle_message("u1", "c2c", "/restart", "text")
+
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "重启" in content  # 不是 "未启用"
+
+    @pytest.mark.asyncio
+    async def test_restart_sets_env_var_with_user_channel(self, channel: QQBotChannel):
+        """/restart 在 execv 前设置 QQ_BOT_RESTART_NOTIFY 环境变量。"""
+        _setup_mock_api(channel)
+
+        with patch("os.execv"), \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch.dict(os.environ, {}, clear=True):
+            await channel.handle_message("u1", "groupX", "/restart", "text")
+
+            import json
+            raw = os.environ.get("QQ_BOT_RESTART_NOTIFY", "")
+            assert raw
+            info = json.loads(raw)
+            assert info["user_id"] == "u1"
+            assert info["channel_id"] == "groupX"
+
+    @pytest.mark.asyncio
+    async def test_restart_env_var_overwrites_previous(self, channel: QQBotChannel):
+        """重复 /restart 时环境变量被覆盖为最新值。"""
+        _setup_mock_api(channel)
+
+        with patch("os.execv"), \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch.dict(os.environ, {"QQ_BOT_RESTART_NOTIFY": '{"old":"data"}'},
+                        clear=True):
+            await channel.handle_message("u2", "c2c", "/restart", "text")
+
+            import json
+            info = json.loads(os.environ["QQ_BOT_RESTART_NOTIFY"])
+            assert info["user_id"] == "u2"
+
+    @pytest.mark.asyncio
+    async def test_restart_execv_uses_sys_executable(self, channel: QQBotChannel):
+        """os.execv 使用 sys.argv[0]（原始入口脚本）而非 sys.executable，
+        过滤原始 --config 并替换为绝对路径。"""
+        _setup_mock_api(channel)
+
+        with patch("os.execv") as mock_execv, \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch.dict(os.environ, {}, clear=True), \
+             patch("agent_core.channels.qq_bot.channel.sys") as mock_sys:
+            mock_sys.argv = ["agent-core-qqbot", "start", "--config", "cfg.json"]
+            # 模拟启动时已解析的配置路径
+            channel._config_path = Path("/abs/path/to/config.json")
+            await channel.handle_message("u1", "c2c", "/restart", "text")
+
+        mock_execv.assert_called_once_with(
+            "agent-core-qqbot",
+            ["agent-core-qqbot", "start",
+             "--config", str(Path("/abs/path/to/config.json"))],
+        )
+
+    @pytest.mark.asyncio
+    async def test_restart_without_client_still_execv(self, channel: QQBotChannel):
+        """无 client 时 /restart 不抛异常，仍调用 execv（消息发送静默失败）。"""
+        with patch("os.execv") as mock_execv, \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch.dict(os.environ, {}, clear=True):
+            await channel.handle_message("u1", "c2c", "/restart", "text")
+
+        mock_execv.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_restart_with_args_is_unknown(self, channel: QQBotChannel):
+        """/restart 后带参数（如 /restart now）不精确匹配，落到未知指令分支。"""
+        mock_api = _setup_mock_api(channel)
+
+        with patch("os.execv") as mock_execv:
+            await channel.handle_message("u1", "c2c", "/restart now", "text")
+
+        mock_execv.assert_not_called()
+        content = mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "未知指令" in content

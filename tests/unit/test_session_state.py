@@ -268,3 +268,120 @@ class TestCompactionDetection:
 
         entries = await load_entries(p)
         assert all(e.type == "message" for e in entries)  # no checkpoint
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint (v1): checkpoint_dict / restore_checkpoint
+# ---------------------------------------------------------------------------
+
+
+def _user_msg(text):
+    return {"role": "user", "content": [{"type": "text", "text": text}]}
+
+
+class TestCheckpointDict:
+    def test_checkpoint_dict_contains_all_fields(self):
+        """checkpoint_dict() includes all expected top-level keys."""
+        s = SessionState()
+        d = s.checkpoint_dict()
+        for key in (
+            "version", "session_id", "title", "created_at", "last_active_at",
+            "message_count", "written_count", "compaction_count",
+            "workspace_override", "permission_rules",
+        ):
+            assert key in d, f"missing key: {key}"
+        assert d["version"] == 1
+        assert d["session_id"] == s.session_id
+        assert d["workspace_override"] is None
+        assert d["permission_rules"] == []
+
+    def test_checkpoint_dict_extracts_title_from_first_user_msg(self):
+        """checkpoint_dict() extracts title from first user message, truncated."""
+        s = SessionState(messages=[
+            _user_msg("A" * 120),
+            _user_msg("second"),
+        ])
+        d = s.checkpoint_dict()
+        assert len(d["title"]) == 100
+        assert d["title"].startswith("A" * 100)
+
+    def test_checkpoint_dict_title_empty_message(self):
+        """checkpoint_dict() handles user message with empty text."""
+        s = SessionState(messages=[
+            {"role": "user", "content": [{"type": "text", "text": ""}]},
+        ])
+        d = s.checkpoint_dict()
+        assert d["title"] == "(空消息)"
+
+    def test_checkpoint_dict_includes_permission_rules(self):
+        """checkpoint_dict() serializes session permission rules."""
+        s = SessionState()
+        s.permission_store.add_allow("Bash")
+        s.permission_store.add_deny("Write")
+        d = s.checkpoint_dict()
+        assert len(d["permission_rules"]) == 2
+        actions = {r["action"] for r in d["permission_rules"]}
+        assert actions == {"allow", "deny"}
+
+
+class TestRestoreCheckpoint:
+    def test_restore_checkpoint_applies_workspace_override(self):
+        """restore_checkpoint() restores workspace_override."""
+        s = SessionState()
+        assert s.workspace_override is None
+        s.restore_checkpoint({"workspace_override": "/tmp/test"})
+        assert s.workspace_override == "/tmp/test"
+
+    def test_restore_checkpoint_applies_permission_rules(self):
+        """restore_checkpoint() restores permission_rules."""
+        s = SessionState()
+        assert len(s.permission_store.rules()) == 0
+
+        s.restore_checkpoint({
+            "permission_rules": [
+                {
+                    "tool_pattern": "Bash",
+                    "action": "allow",
+                    "priority": 20,
+                    "source": "session",
+                    "description": "Session allow for 'Bash'.",
+                }
+            ],
+        })
+        assert len(s.permission_store.rules()) == 1
+        assert s.permission_store.rules()[0].action == "allow"
+
+    def test_restore_checkpoint_idempotent(self):
+        """Repeated restore_checkpoint() does not duplicate rules."""
+        s = SessionState()
+        rules = [
+            {
+                "tool_pattern": "Bash",
+                "action": "allow",
+                "priority": 20,
+                "source": "session",
+                "description": "Session allow for 'Bash'.",
+            },
+        ]
+        s.restore_checkpoint({"permission_rules": rules})
+        s.restore_checkpoint({"permission_rules": rules})
+        assert len(s.permission_store.rules()) == 1
+
+    def test_restore_checkpoint_does_not_overwrite_counts(self):
+        """restore_checkpoint() does NOT overwrite _written_count / _compaction_count."""
+        s = SessionState()
+        s._written_count = 99
+        s._compaction_count = 5
+        s.restore_checkpoint({"written_count": 10, "compaction_count": 1})
+        assert s._written_count == 99
+        assert s._compaction_count == 5
+
+    def test_restore_checkpoint_preserves_timestamps(self):
+        """restore_checkpoint() applies created_at / last_active_at."""
+        s = SessionState()
+        s.restore_checkpoint({
+            "created_at": "2026-01-01T00:00:00",
+            "last_active_at": "2026-07-01T12:00:00",
+        })
+        assert s._created_at == "2026-01-01T00:00:00"
+        assert s._last_active_at == "2026-07-01T12:00:00"

@@ -55,6 +55,32 @@ class QQBotClient(botpy.Client):
         self._channel = channel
 
     # ------------------------------------------------------------------
+    # 生命周期
+    # ------------------------------------------------------------------
+
+    async def on_ready(self) -> None:
+        """botpy WebSocket 连接就绪后回调，处理重启通知等。"""
+        import json
+        import os as _os
+        raw = _os.environ.pop("QQ_BOT_RESTART_NOTIFY", None)
+        if raw is None:
+            return
+        try:
+            info = json.loads(raw)
+            uid = info["user_id"]
+            cid = info["channel_id"]
+        except (json.JSONDecodeError, KeyError):
+            return
+        logger.info("Sending restart notification to user=%s channel=%s", uid, cid)
+        try:
+            if cid == "c2c":
+                await self.api.post_c2c_message(openid=uid, msg_type=0, content="服务重启完成，可以继续使用。")
+            else:
+                await self.api.post_group_message(group_openid=cid, msg_type=0, content="服务重启完成，可以继续使用。")
+        except Exception:
+            logger.exception("Failed to send restart notification")
+
+    # ------------------------------------------------------------------
     # 事件回调
     # ------------------------------------------------------------------
 

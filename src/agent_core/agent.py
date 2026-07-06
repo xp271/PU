@@ -180,11 +180,18 @@ class Agent:
             )
         ) as stream:
             async for message in stream:
-                # Thread this turn's full history back into the session so the
-                # next prompt continues the conversation.
-                if session is not None and message.type == "done":
-                    await session.flush_new_messages(message.final_messages)
-                    session.record_turn_result(message.final_messages)
+                if session is not None:
+                    if message.type == "flush":
+                        # Mid-turn persistence boundary: flush accumulated
+                        # messages to JSONL *before* tool execution so that
+                        # a kill during tool run loses at most this turn.
+                        await session.flush_new_messages(message.messages)
+                    elif message.type == "done":
+                        # Terminal turn: flush remaining messages and record
+                        # the full history into session state for the next
+                        # prompt.
+                        await session.flush_new_messages(message.final_messages)
+                        session.record_turn_result(message.final_messages)
                 # §Item 12: bypass-record every message (never mutates it).
                 if recorder is not None:
                     await recorder.record_message(message)  # type: ignore[attr-defined]

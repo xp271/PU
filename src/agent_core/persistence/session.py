@@ -11,19 +11,25 @@ import os
 import shutil
 import time as _time
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime
+from typing import Any, TYPE_CHECKING
 
 import aiofiles
 
 from .migrate import migrate_transcript
 from .path import (
+    checkpoint_json_path,
     compute_project_hash,
     list_session_files,
+    project_dir,
     session_jsonl_path,
     sidechain_dir,
 )
 from .recovery import clean_and_rebuild
 from .storage import load_entries
+
+if TYPE_CHECKING:
+    from agent_core.session import SessionState
 
 logger = logging.getLogger("agent_core.persistence.session")
 
@@ -44,11 +50,27 @@ class SessionInfo:
     message_count: int
     project_hash: str
     has_unfinished_turn: bool = False
+    workspace_override: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # list_sessions
 # ---------------------------------------------------------------------------
+
+
+def _list_all_session_keys(project_hash: str) -> set[str]:
+    """Scan project_dir for both .jsonl and .checkpoint.json, return
+    the union of session keys (filename stems)."""
+    d = project_dir(project_hash)
+    if not os.path.isdir(d):
+        return set()
+    keys: set[str] = set()
+    for name in os.listdir(d):
+        if name.endswith(".checkpoint.json"):
+            keys.add(name[: -len(".checkpoint.json")])
+        elif name.endswith(".jsonl"):
+            keys.add(name[: -len(".jsonl")])
+    return keys
 
 
 async def list_sessions(
@@ -57,22 +79,34 @@ async def list_sessions(
     """Scan the project's transcript directory and return metadata for
     every session, sorted by last activity (most recent first).
 
-    **Performance note (problem #7):** ``message_count`` requires a full
-    file read.  For directory listings, the count is computed lazily:
-    it is set to -1 when the file wasn't fully scanned and computed
-    (via a separate read) when the caller requests it.  ``has_unfinished_turn``
-    is determined from the last entry, which requires seeking to the file
-    tail (cheap) plus reading the last line.
+    Dual-source scan: reads ``.checkpoint.json`` for fast metadata (O(1))
+    when available; falls back to JSONL scanning for sessions without a
+    checkpoint file.
     """
     project_hash = compute_project_hash(workspace_root)
-    session_ids = list_session_files(project_hash)
-    if not session_ids:
+    all_keys = _list_all_session_keys(project_hash)
+    if not all_keys:
         return []
 
     result: list[SessionInfo] = []
-    for sid in session_ids:
-        path = session_jsonl_path(project_hash, sid)
-        info = await _read_session_info(sid, path, project_hash)
+    for key in sorted(all_keys):
+        # 1) Try fast path: read checkpoint metadata
+        ckpt = await load_checkpoint(key, project_hash=project_hash)
+        if ckpt is not None:
+            result.append(SessionInfo(
+                session_id=key,
+                title=ckpt.get("title", "(no title)"),
+                created_at=str(ckpt.get("created_at", "")),
+                last_activity=str(ckpt.get("last_active_at", "")),
+                message_count=int(ckpt.get("message_count", 0)),
+                project_hash=project_hash,
+                workspace_override=ckpt.get("workspace_override"),
+            ))
+            continue
+
+        # 2) Fallback: scan JSONL
+        path = session_jsonl_path(project_hash, key)
+        info = await _read_session_info(key, path, project_hash)
         if info is not None:
             result.append(info)
 
@@ -339,3 +373,107 @@ async def cleanup_old_sessions(
         dry_run,
     )
     return deleted
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint (v1): lightweight session snapshot for cross-process resume
+# ---------------------------------------------------------------------------
+
+
+async def save_checkpoint(
+    session: "SessionState",
+    *,
+    checkpoint_key: str | None = None,
+    workspace_root: str | None = None,
+    project_hash: str | None = None,
+) -> bool:
+    """Persist session metadata as ``.checkpoint.json`` alongside the ``.jsonl``.
+
+    Idempotent — overwrites an existing file of the same name.
+    Empty sessions (``messages=[]``) are still saved (so ``workspace_override``
+    is preserved).
+
+    *checkpoint_key* defaults to ``session.session_id``.
+    Returns ``True`` on success.
+    """
+    if project_hash is None:
+        project_hash = compute_project_hash(workspace_root)
+
+    ckpt_key = checkpoint_key or session.session_id
+    ckpt_path = checkpoint_json_path(project_hash, ckpt_key)
+
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+
+    # Timestamps: created_at only on first save, last_active_at every save
+    now = datetime.now().isoformat()
+    if session._created_at is None:
+        session._created_at = now
+    session._last_active_at = now
+
+    async with aiofiles.open(ckpt_path, "w", encoding="utf-8") as fh:
+        await fh.write(
+            json.dumps(
+                session.checkpoint_dict(), ensure_ascii=False, indent=2,
+            )
+        )
+    return True
+
+
+async def load_checkpoint(
+    checkpoint_key: str,
+    *,
+    workspace_root: str | None = None,
+    project_hash: str | None = None,
+) -> dict[str, object] | None:
+    """Read ``.checkpoint.json`` and return the raw dict, or ``None``
+    if the file is missing or corrupt."""
+    if project_hash is None:
+        project_hash = compute_project_hash(workspace_root)
+
+    ckpt_path = checkpoint_json_path(project_hash, checkpoint_key)
+    if not os.path.isfile(ckpt_path):
+        return None
+
+    async with aiofiles.open(ckpt_path, "r", encoding="utf-8") as fh:
+        raw = await fh.read()
+    try:
+        return json.loads(raw)  # type: ignore[no-any-return]
+    except json.JSONDecodeError:
+        logger.warning("Corrupted checkpoint: %s", ckpt_path)
+        return None
+
+
+async def load_session_full(
+    session_id: str,
+    *,
+    checkpoint_key: str | None = None,
+    workspace_root: str | None = None,
+    project_hash: str | None = None,
+) -> "SessionState | None":
+    """``load_session()`` + checkpoint restore.
+
+    1. Restore ``messages`` + ``_written_count`` + ``_compaction_count``
+       from JSONL (authoritative).
+    2. Overlay ``workspace_override`` + ``permission_rules`` + timestamps
+       from ``.checkpoint.json``.
+
+    *checkpoint_key* defaults to *session_id*.
+    """
+    session = await load_session(
+        session_id,
+        workspace_root=workspace_root,
+        project_hash=project_hash,
+    )
+    if session is None:
+        return None
+
+    ckpt_key = checkpoint_key or session_id
+    ckpt = await load_checkpoint(
+        ckpt_key,
+        workspace_root=workspace_root,
+        project_hash=project_hash,
+    )
+    if ckpt is not None:
+        session.restore_checkpoint(ckpt)
+
+    return session

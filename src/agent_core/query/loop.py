@@ -34,6 +34,7 @@ from ..models import (
     CompactMessage,
     DoneMessage,
     ErrorMessage,
+    FlushMessage,
     ToolResult,
     ToolUse,
 )
@@ -547,6 +548,13 @@ async def _run_turns(
             )
             return
 
+        # -- 2d5. Persistence boundary before tool execution ---------------
+        # Flush the current message list (including the assistant message
+        # with tool_use requests) to JSONL *before* tools run.  If the
+        # process is killed during tool execution, the JSONL is complete
+        # up to this boundary and can be recovered.
+        yield FlushMessage(messages=list(messages))
+
         # -- 2e. Execute tools & yield results ------------------------------
         tool_results = await run_tools(
             tool_uses_in_turn,
@@ -612,15 +620,16 @@ def _build_assistant_message(
 ) -> dict[str, Any]:
     """Build an assistant message from accumulated text and tool-use blocks.
 
-    Empty text fragments are skipped so that no ``{"type":"text","text":""}``
-    blocks are produced.
+    All streaming text fragments are joined into a *single* ``text`` block
+    so that the persisted content is compact and human-readable (no 69-block
+    messages from 69 streaming deltas).
     """
     content: list[dict[str, Any]] = []
 
-    for t in texts:
-        stripped = t.strip()
-        if stripped:
-            content.append({"type": "text", "text": stripped})
+    # Merge all streaming text fragments into a single text block
+    merged = "".join(texts).strip()
+    if merged:
+        content.append({"type": "text", "text": merged})
 
     for tu in tool_uses:
         content.append({

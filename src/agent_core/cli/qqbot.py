@@ -61,8 +61,10 @@ _CONFIG_TEMPLATE = """{
 # ---------------------------------------------------------------------------
 
 
-def _load_qqbot_config(config_path: str | None, cli_overrides: dict[str, str]) -> QQBotConfig:
-    """加载 QQ 机器人配置。
+def _load_qqbot_config(
+    config_path: str | None, cli_overrides: dict[str, str],
+) -> tuple[QQBotConfig, Path | None]:
+    """加载 QQ 机器人配置。返回 (配置, 解析后的配置文件路径)。
 
     优先级：配置文件 < 环境变量 < CLI 参数。
     如果环境变量已提供 app_id 和 app_secret，配置文件不是必需的。
@@ -70,7 +72,7 @@ def _load_qqbot_config(config_path: str | None, cli_overrides: dict[str, str]) -
     raw: dict[str, Any] = {}
 
     # 1. 读配置文件
-    path = Path(config_path) if config_path else _find_config_file()
+    path = Path(config_path).resolve() if config_path else _find_config_file()
     if path is not None and path.is_file():
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -104,7 +106,7 @@ def _load_qqbot_config(config_path: str | None, cli_overrides: dict[str, str]) -
         sys.exit(1)
 
     try:
-        return QQBotConfig(**qqbot_raw)
+        return QQBotConfig(**qqbot_raw), path
     except ValidationError as exc:
         print(f"[qqbot] Invalid config: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -155,7 +157,9 @@ def _cmd_init(config_path: str | None) -> None:
 
 async def _cmd_start(config_path: str | None, cli_overrides: dict[str, str]) -> None:
     """启动 QQ 机器人。"""
-    config = _load_qqbot_config(config_path, cli_overrides)
+    import signal as _signal
+
+    config, resolved_path = _load_qqbot_config(config_path, cli_overrides)
 
     # 日志：同时输出到控制台和项目目录下的 logs/qqbot.log
     _setup_logging()
@@ -167,7 +171,21 @@ async def _cmd_start(config_path: str | None, cli_overrides: dict[str, str]) -> 
 
     from ..channels.qq_bot.channel import QQBotChannel
 
-    channel = QQBotChannel(config)
+    channel = QQBotChannel(config, resolved_path)
+
+    # 注册信号处理器（signal.signal 跨线程生效，botpy 在子线程）
+    _shutting_down = False
+
+    def _on_signal(signum, frame):
+        nonlocal _shutting_down
+        if _shutting_down:
+            return
+        _shutting_down = True
+        logger.info("received signal %d, shutting down...", signum)
+
+    _signal.signal(_signal.SIGINT, _on_signal)
+    _signal.signal(_signal.SIGTERM, _on_signal)
+
     logger.info(f"starting QQ bot (app_id={config.app_id[:8]}...)")
 
     try:
@@ -177,6 +195,12 @@ async def _cmd_start(config_path: str | None, cli_overrides: dict[str, str]) -> 
     except Exception:
         logger.exception("server crashed")
         sys.exit(1)
+    finally:
+        saved = channel._bridge.shutdown()
+        if saved > 0:
+            logger.info("shutdown: saved %d active session(s)", saved)
+        else:
+            logger.info("shutdown: no active sessions to save")
 
 
 def _setup_logging() -> None:

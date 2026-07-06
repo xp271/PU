@@ -58,6 +58,15 @@ def sidechain_jsonl_path(project_hash: str, session_id: str, agent_id: str) -> s
     return os.path.join(sidechain_dir(project_hash, session_id), f"{agent_id}.jsonl")
 
 
+def checkpoint_json_path(project_hash: str, checkpoint_key: str) -> str:
+    """``{cwd}/.agent/sessions/{project_hash}/{checkpoint_key}.checkpoint.json``
+
+    *checkpoint_key* 可以是 ``session.session_id`` (CLI/UUID) 或经过 sanitize
+    的 bridge session key (QQBot，例如 ``"c2c_user1"``)。
+    """
+    return os.path.join(project_dir(project_hash), f"{checkpoint_key}.checkpoint.json")
+
+
 def list_session_files(project_hash: str) -> list[str]:
     """Return ``{session_id}.jsonl`` filenames sorted by *mtime* descending.
 

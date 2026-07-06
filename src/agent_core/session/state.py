@@ -65,8 +65,14 @@ class SessionState:
 
     When non-None, Agent creation uses this instead of config.workspace_root.
     CLI/REPL never sets this field, so existing behavior is unaffected.
-    Not persisted -- restored to config.workspace_root on QQBot restart.
     """
+
+    # -- checkpoint metadata (v1) ---------------------------------------------
+    _created_at: str | None = field(default=None, repr=False)
+    """ISO timestamp set on first ``save_checkpoint``.  Read-only after set."""
+
+    _last_active_at: str | None = field(default=None, repr=False)
+    """ISO timestamp updated on every ``save_checkpoint``."""
 
     # ------------------------------------------------------------------
     # In-memory history (Phase A)
@@ -93,6 +99,58 @@ class SessionState:
         memory is left intact."""
         self.messages = []
         self._written_count = 0
+
+    # ------------------------------------------------------------------
+    # Checkpoint (v1): lightweight snapshot for cross-process resume
+    # ------------------------------------------------------------------
+
+    def checkpoint_dict(self) -> dict[str, object]:
+        """Generate a JSON-serializable checkpoint snapshot.
+
+        Extracts the first user message text as *title* (truncated 100 chars).
+        """
+        title = "(新会话)"
+        for msg in self.messages:
+            if msg.get("role") == "user":
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for b in content:
+                        if isinstance(b, dict) and b.get("type") == "text":
+                            t = b.get("text", "") or "(空消息)"
+                            title = t[:100].replace("\n", " ")
+                            break
+                elif isinstance(content, str):
+                    title = content[:100].replace("\n", " ")
+                break
+
+        return {
+            "version": 1,
+            "session_id": self.session_id,
+            "title": title,
+            "created_at": self._created_at,
+            "last_active_at": self._last_active_at,
+            "message_count": len(self.messages),
+            "written_count": self._written_count,
+            "compaction_count": self._compaction_count,
+            "workspace_override": self.workspace_override,
+            "permission_rules": self.permission_store.to_rules_list(),
+        }
+
+    def restore_checkpoint(self, data: dict[str, object]) -> None:
+        """Apply checkpoint metadata to this session (in-place, idempotent).
+
+        Only restores fields NOT already set by ``load_session`` from JSONL.
+        ``_written_count`` and ``_compaction_count`` are **not** overwritten —
+        JSONL is the authoritative source for message counts; checkpoint
+        values are a snapshot that may be stale if JSONL was rebuilt.
+        """
+        self._created_at = data.get("created_at") or self._created_at
+        self._last_active_at = data.get("last_active_at") or self._last_active_at
+        if data.get("workspace_override") is not None:
+            self.workspace_override = str(data["workspace_override"])
+        rules = data.get("permission_rules", [])
+        if rules:
+            self.permission_store.restore_from_rules(rules)  # type: ignore[arg-type]
 
     # ------------------------------------------------------------------
     # Phase B: persistence lifecycle

@@ -1,0 +1,433 @@
+From b4e3e925d569d66cdc476760ebe99ec992be1e7d Mon Sep 17 00:00:00 2001
+From: D <dxphhhh@outlook.com>
+Date: Sun, 5 Jul 2026 18:14:24 +0800
+Subject: [PATCH 2/3] feat: QQBot dynamic workspace switch (/workspace command)
+
+---
+ src/agent_core/bridge/agent_bridge.py     |  19 +++-
+ src/agent_core/channels/qq_bot/channel.py |  71 ++++++++++++-
+ src/agent_core/channels/qq_bot/types.py   |   4 +
+ src/agent_core/session/state.py           |   9 ++
+ tests/unit/bridge/test_agent_bridge.py    |  73 +++++++++++++
+ tests/unit/qq_bot/test_channel.py         | 124 ++++++++++++++++++++++
+ tests/unit/test_session_state.py          |  17 +++
+ 7 files changed, 315 insertions(+), 2 deletions(-)
+
+diff --git a/src/agent_core/bridge/agent_bridge.py b/src/agent_core/bridge/agent_bridge.py
+index 7aa1a46..4113bd7 100644
+--- a/src/agent_core/bridge/agent_bridge.py
++++ b/src/agent_core/bridge/agent_bridge.py
+@@ -84,6 +84,14 @@ class AgentBridge:
+         self._session_locks.pop(sid, None)
+         self._sessions_last_access.pop(sid, None)
+ 
++    def get_session(self, user_id: str, open_kfid: str) -> "SessionState":
++        """获取或创建指定用户的 SessionState（公开接口）。
++
++        Channel 层可通过此方法访问 session，例如设置 workspace_override。
++        """
++        sid = self.session_id(user_id, open_kfid)
++        return self._get_or_create_session(sid)
++
+     # ------------------------------------------------------------------
+     # 消息处理
+     # ------------------------------------------------------------------
+@@ -105,7 +113,16 @@ class AgentBridge:
+ 
+         async with lock:
+             prompt = self._build_prompt(content, msg_type)
+-            agent = Agent(self._base, session=session)
++
++            # --- dynamic workspace override ---
++            effective_config = self._base
++            if session.workspace_override is not None:
++                effective_config = self._base.model_copy(
++                    update={"workspace_root": session.workspace_override}
++                )
++            # ---
++
++            agent = Agent(effective_config, session=session)
+ 
+             try:
+                 collected: list[str] = []
+diff --git a/src/agent_core/channels/qq_bot/channel.py b/src/agent_core/channels/qq_bot/channel.py
+index 7d54f4a..24ec5e8 100644
+--- a/src/agent_core/channels/qq_bot/channel.py
++++ b/src/agent_core/channels/qq_bot/channel.py
+@@ -39,9 +39,10 @@ class QQBotChannel:
+         self._client: QQBotClient | None = None
+ 
+         base_agent_config = _load_global_agent_config()
++        self._agent_config = config.to_agent_config(base_agent_config)
+         from agent_core.bridge.agent_bridge import AgentBridge
+         self._bridge = AgentBridge(
+-            config.to_agent_config(base_agent_config),
++            self._agent_config,
+             system_prompt=config.system_prompt,
+         )
+ 
+@@ -83,6 +84,12 @@ class QQBotChannel:
+         self, user_id: str, channel_id: str, content: str, msg_type: str,
+     ) -> None:
+         """处理一条用户消息 → Agent 推理 → 回复。"""
++        # --- workspace 切换指令（在 Agent 处理之前） ---
++        if content.startswith("/workspace"):
++            await self._handle_workspace_command(user_id, channel_id, content)
++            return
++        # ---
++
+         try:
+             replies = await self._bridge.process(
+                 user_id, channel_id, content, msg_type
+@@ -99,3 +106,65 @@ class QQBotChannel:
+                 await api.post_c2c_message(openid=user_id, msg_type=0, content=text)
+             else:
+                 await api.post_group_message(group_openid=channel_id, msg_type=0, content=text)
++    async def _handle_workspace_command(
++        self, user_id: str, channel_id: str, content: str,
++    ) -> None:
++        """处理 /workspace 指令：查看、切换或重置工作目录。"""
++        import os
++
++        if not self._config.allow_workspace_switch:
++            await self._send_message(
++                user_id, channel_id, "工作目录切换功能未启用。"
++            )
++            return
++
++        session = self._bridge.get_session(user_id, channel_id)
++        arg = content[len("/workspace"):].strip()
++
++        if not arg:
++            current = (
++                session.workspace_override
++                or self._agent_config.workspace_root
++                or "未设置（无限制）"
++            )
++            await self._send_message(
++                user_id, channel_id, f"当前工作目录: {current}"
++            )
++            return
++
++        if arg == "--reset":
++            session.workspace_override = None
++            session.clear_history()
++            default = self._agent_config.workspace_root or "未设置"
++            await self._send_message(
++                user_id, channel_id,
++                f"工作目录已重置为默认: {default}\n对话历史已重置。"
++            )
++            return
++
++        new_path = os.path.abspath(arg)
++        if not os.path.isdir(new_path):
++            await self._send_message(
++                user_id, channel_id, f"目录不存在: {new_path}"
++            )
++            return
++
++        session.workspace_override = new_path
++        session.clear_history()
++        await self._send_message(
++            user_id, channel_id,
++            f"工作目录已切换至: {new_path}\n对话历史已重置。"
++        )
++
++    async def _send_message(
++        self, user_id: str, channel_id: str, content: str,
++    ) -> None:
++        """发送一条文本消息到 C2C 或群聊。"""
++        api = self._client.api if self._client is not None else None
++        if api is None:
++            return
++        if channel_id == "c2c":
++            await api.post_c2c_message(openid=user_id, msg_type=0, content=content)
++        else:
++            await api.post_group_message(group_openid=channel_id, msg_type=0, content=content)
++
+diff --git a/src/agent_core/channels/qq_bot/types.py b/src/agent_core/channels/qq_bot/types.py
+index f599e6d..2a35bb9 100644
+--- a/src/agent_core/channels/qq_bot/types.py
++++ b/src/agent_core/channels/qq_bot/types.py
+@@ -39,6 +39,10 @@ class QQBotConfig(BaseModel):
+     system_prompt: str | None = Field(default=None)
+     tools: list[str] = Field(default_factory=lambda: ["*"])
+     workspace_root: str | None = Field(default=None)
++    allow_workspace_switch: bool = Field(
++        default=True,
++        description="允许 QQBot 用户在对话中通过 /workspace 切换工作目录",
++    )
+     api_keys: dict[str, str] = Field(default_factory=dict)
+     base_urls: dict[str, str] = Field(default_factory=dict)
+ 
+diff --git a/src/agent_core/session/state.py b/src/agent_core/session/state.py
+index 8488f09..2a14956 100644
+--- a/src/agent_core/session/state.py
++++ b/src/agent_core/session/state.py
+@@ -60,6 +60,14 @@ class SessionState:
+     ``load_session`` on resume so ``segment_index`` keeps increasing across
+     sessions instead of restarting at 1."""
+ 
++    workspace_override: str | None = None
++    """QQBot can dynamically set workspace override.
++
++    When non-None, Agent creation uses this instead of config.workspace_root.
++    CLI/REPL never sets this field, so existing behavior is unaffected.
++    Not persisted -- restored to config.workspace_root on QQBot restart.
++    """
++
+     # ------------------------------------------------------------------
+     # In-memory history (Phase A)
+     # ------------------------------------------------------------------
+@@ -84,6 +92,7 @@ class SessionState:
+         """Drop conversation history (e.g. a ``/clear`` command). Permission
+         memory is left intact."""
+         self.messages = []
++        self._written_count = 0
+ 
+     # ------------------------------------------------------------------
+     # Phase B: persistence lifecycle
+diff --git a/tests/unit/bridge/test_agent_bridge.py b/tests/unit/bridge/test_agent_bridge.py
+index 4af6640..e352e56 100644
+--- a/tests/unit/bridge/test_agent_bridge.py
++++ b/tests/unit/bridge/test_agent_bridge.py
+@@ -164,3 +164,76 @@ class TestProcess:
+         result = await bridge.process("u1", "ch1", "test", "text")
+         assert len(result) == 2
+         assert all(len(c) <= 1900 for c in result)
++
++
++class TestGetSession:
++    """AgentBridge.get_session() 公开接口测试。"""
++
++    @pytest.mark.asyncio
++    async def test_get_session_creates(self, bridge: AgentBridge):
++        """get_session() 首次调用创建新 session。"""
++        s = bridge.get_session("u1", "ch1")
++        assert s is not None
++        assert s.messages == []
++
++    @pytest.mark.asyncio
++    async def test_get_session_reuses(self, bridge: AgentBridge):
++        """get_session() 重复调用返回同一个 session。"""
++        s1 = bridge.get_session("u1", "ch1")
++        s2 = bridge.get_session("u1", "ch1")
++        assert s1 is s2
++
++    @pytest.mark.asyncio
++    async def test_get_session_independent_users(self, bridge: AgentBridge):
++        """不同用户有独立的 session。"""
++        s1 = bridge.get_session("u1", "ch1")
++        s2 = bridge.get_session("u2", "ch1")
++        assert s1 is not s2
++
++
++class TestWorkspaceOverride:
++    """AgentBridge.process() 中 workspace_override 的测试。"""
++
++    @pytest.mark.asyncio
++    async def test_process_uses_workspace_override(self, bridge: AgentBridge, mock_agent_cls):
++        """session.workspace_override 非 None 时，Agent 收到覆盖后的 config。"""
++        mock_agent_cls.return_value = _make_mock_agent(["ok"])
++        session = bridge.get_session("u1", "ch1")
++        session.workspace_override = "D:\\test_ws"
++
++        await bridge.process("u1", "ch1", "test", "text")
++
++        # 验证传入 Agent 的 config.workspace_root 是覆盖后的值
++        call_args = mock_agent_cls.call_args
++        passed_config = call_args[0][0]  # first positional arg = AgentConfig
++        assert passed_config.workspace_root == "D:\\test_ws"
++
++    @pytest.mark.asyncio
++    async def test_process_no_override_no_change(self, bridge: AgentBridge, mock_agent_cls):
++        """session.workspace_override 为 None 时，Agent 使用原始 config。"""
++        mock_agent_cls.return_value = _make_mock_agent(["ok"])
++
++        await bridge.process("u1", "ch1", "test", "text")
++
++        call_args = mock_agent_cls.call_args
++        passed_config = call_args[0][0]
++        # Should be the same as self._base (original, not overwritten)
++        assert passed_config is bridge._base
++
++    @pytest.mark.asyncio
++    async def test_process_override_reset(self, bridge: AgentBridge, mock_agent_cls):
++        """workspace_override 设为 None 后恢复使用原始 config。"""
++        mock_agent_cls.return_value = _make_mock_agent(["ok"])
++        session = bridge.get_session("u1", "ch1")
++        session.workspace_override = "D:\\test_ws"
++
++        await bridge.process("u1", "ch1", "test", "text")
++        assert mock_agent_cls.call_args[0][0].workspace_root == "D:\\test_ws"
++
++        # Reset
++        session.workspace_override = None
++        mock_agent_cls.reset_mock()
++        mock_agent_cls.return_value = _make_mock_agent(["ok2"])
++
++        await bridge.process("u1", "ch1", "test2", "text")
++        assert mock_agent_cls.call_args[0][0] is bridge._base
+diff --git a/tests/unit/qq_bot/test_channel.py b/tests/unit/qq_bot/test_channel.py
+index bdd6ee5..825ccb8 100644
+--- a/tests/unit/qq_bot/test_channel.py
++++ b/tests/unit/qq_bot/test_channel.py
+@@ -108,3 +108,127 @@ class TestQQBotChannel:
+         channel._config.app_id = ""
+         with pytest.raises(ValueError):
+             await channel.start()
++
++
++class TestWorkspaceCommand:
++    """QQBotChannel._handle_workspace_command 测试。"""
++
++    @pytest.mark.asyncio
++    async def test_workspace_no_arg_shows_current(self, channel: "QQBotChannel"):
++        """无参数 /workspace 显示当前工作目录。"""
++        mock_api = AsyncMock()
++        channel._client = MagicMock()
++        channel._client.api = mock_api
++        channel._agent_config.workspace_root = "C:\\PU"
++
++        await channel.handle_message("u1", "c2c", "/workspace", "text")
++
++        mock_api.post_c2c_message.assert_called_once()
++        content = mock_api.post_c2c_message.call_args.kwargs["content"]
++        assert "C:\\PU" in content
++
++    @pytest.mark.asyncio
++    async def test_workspace_shows_override_when_set(self, channel: "QQBotChannel"):
++        """/workspace 应优先显示 workspace_override。"""
++        mock_api = AsyncMock()
++        channel._client = MagicMock()
++        channel._client.api = mock_api
++        channel._agent_config.workspace_root = "C:\\PU"
++        session = channel._bridge.get_session("u1", "c2c")
++        session.workspace_override = "D:\\other"
++
++        await channel.handle_message("u1", "c2c", "/workspace", "text")
++
++        content = mock_api.post_c2c_message.call_args.kwargs["content"]
++        assert "D:\\other" in content
++
++    @pytest.mark.asyncio
++    async def test_workspace_switch_success(self, channel: "QQBotChannel"):
++        """/workspace <path> 切换并清空历史。"""
++        import os, tempfile
++        mock_api = AsyncMock()
++        channel._client = MagicMock()
++        channel._client.api = mock_api
++
++        with tempfile.TemporaryDirectory() as tmpdir:
++            await channel.handle_message("u1", "c2c", f"/workspace {tmpdir}", "text")
++
++            session = channel._bridge.get_session("u1", "c2c")
++            assert session.workspace_override == os.path.abspath(tmpdir)
++            assert session.messages == []
++
++            content = mock_api.post_c2c_message.call_args.kwargs["content"]
++            assert "已切换至" in content
++
++    @pytest.mark.asyncio
++    async def test_workspace_switch_dir_not_exist(self, channel: "QQBotChannel"):
++        """/workspace 不存在的目录应报错，session 不变。"""
++        mock_api = AsyncMock()
++        channel._client = MagicMock()
++        channel._client.api = mock_api
++
++        await channel.handle_message("u1", "c2c", "/workspace Z:/does_not_exist", "text")
++
++        session = channel._bridge.get_session("u1", "c2c")
++        assert session.workspace_override is None
++
++        content = mock_api.post_c2c_message.call_args.kwargs["content"]
++        assert "不存在" in content
++
++    @pytest.mark.asyncio
++    async def test_workspace_reset(self, channel: "QQBotChannel"):
++        """/workspace --reset 清除 override。"""
++        mock_api = AsyncMock()
++        channel._client = MagicMock()
++        channel._client.api = mock_api
++        channel._agent_config.workspace_root = "C:\\PU"
++        session = channel._bridge.get_session("u1", "c2c")
++        session.workspace_override = "D:\\other"
++
++        await channel.handle_message("u1", "c2c", "/workspace --reset", "text")
++
++        assert session.workspace_override is None
++        assert session.messages == []
++        content = mock_api.post_c2c_message.call_args.kwargs["content"]
++        assert "已重置" in content
++
++    @pytest.mark.asyncio
++    async def test_workspace_switch_disabled(self, channel: "QQBotChannel"):
++        """allow_workspace_switch=False 时返回错误。"""
++        mock_api = AsyncMock()
++        channel._client = MagicMock()
++        channel._client.api = mock_api
++        channel._config.allow_workspace_switch = False
++
++        await channel.handle_message("u1", "c2c", "/workspace D:\\test", "text")
++
++        content = mock_api.post_c2c_message.call_args.kwargs["content"]
++        assert "未启用" in content
++
++    @pytest.mark.asyncio
++    async def test_workspace_group_chat(self, channel: "QQBotChannel"):
++        """/workspace 在群聊中也正常工作。"""
++        import os, tempfile
++        mock_api = AsyncMock()
++        channel._client = MagicMock()
++        channel._client.api = mock_api
++
++        with tempfile.TemporaryDirectory() as tmpdir:
++            await channel.handle_message("u1", "group123", f"/workspace {tmpdir}", "text")
++
++            mock_api.post_group_message.assert_called_once()
++            content = mock_api.post_group_message.call_args.kwargs["content"]
++            assert "已切换至" in content
++
++    @pytest.mark.asyncio
++    async def test_workspace_no_agent_config_ws(self, channel: "QQBotChannel"):
++        """/workspace 无参数且 agent_config.workspace_root 为 None 时显示提示。"""
++        mock_api = AsyncMock()
++        channel._client = MagicMock()
++        channel._client.api = mock_api
++        channel._agent_config.workspace_root = None
++
++        await channel.handle_message("u1", "c2c", "/workspace", "text")
++
++        content = mock_api.post_c2c_message.call_args.kwargs["content"]
++        assert "未设置" in content
+diff --git a/tests/unit/test_session_state.py b/tests/unit/test_session_state.py
+index 8771172..9f9febb 100644
+--- a/tests/unit/test_session_state.py
++++ b/tests/unit/test_session_state.py
+@@ -57,6 +57,23 @@ def test_clear_history_keeps_permission_memory():
+     assert s.permission_store.rules()  # permissions survive /clear
+ 
+ 
++def test_workspace_override_default():
++    """workspace_override defaults to None."""
++    s = SessionState()
++    assert s.workspace_override is None
++
++
++def test_clear_history_resets_written_count():
++    """clear_history() also resets _written_count to 0."""
++    s = SessionState()
++    s._written_count = 5
++    s.messages.append({"role": "user", "content": "hi"})
++    s.clear_history()
++    assert s.messages == []
++    assert s._written_count == 0
++
++
++
+ # ---------------------------------------------------------------------------
+ # Phase B: persistence lifecycle (Item 10)
+ # ---------------------------------------------------------------------------
+-- 
+2.54.0.windows.1
+

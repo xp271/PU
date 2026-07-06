@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent_core.bridge.agent_bridge import AgentBridge
 from agent_core.models import AgentConfig
+from agent_core.session import SessionState
 
 
 @pytest.fixture
@@ -44,32 +47,36 @@ class TestSessionManagement:
         assert sid == "channel1:user1"
 
     def test_session_creation(self, bridge: AgentBridge):
-        s = bridge._get_or_create_session("ch1:u1")
+        s, is_new = bridge._get_or_create_session("ch1:u1")
         assert s is not None
-        assert bridge._get_or_create_session("ch1:u1") is s
+        assert is_new is True
 
     def test_session_reuse(self, bridge: AgentBridge):
-        s1 = bridge._get_or_create_session("ch1:u1")
-        s2 = bridge._get_or_create_session("ch1:u1")
+        s1, is_new1 = bridge._get_or_create_session("ch1:u1")
+        s2, is_new2 = bridge._get_or_create_session("ch1:u1")
         assert s1 is s2
+        assert is_new1 is True
+        assert is_new2 is False
 
     def test_session_timeout_lazy_cleanup(self, bridge: AgentBridge):
         import time
         sid = "ch1:u1"
-        s1 = bridge._get_or_create_session(sid)
+        s1, _ = bridge._get_or_create_session(sid)
         time.sleep(0.15)
-        s2 = bridge._get_or_create_session(sid)
+        s2, is_new = bridge._get_or_create_session(sid)
         assert s1 is not s2
+        assert is_new is True
 
     def test_clear_session(self, bridge: AgentBridge):
         bridge._get_or_create_session("ch1:u1")
         bridge.clear_session("u1", "ch1")
-        s = bridge._get_or_create_session("ch1:u1")
+        s, is_new = bridge._get_or_create_session("ch1:u1")
         assert len(s.messages) == 0
+        assert is_new is True
 
     def test_different_users_independent(self, bridge: AgentBridge):
-        s1 = bridge._get_or_create_session("ch1:u1")
-        s2 = bridge._get_or_create_session("ch1:u2")
+        s1, _ = bridge._get_or_create_session("ch1:u1")
+        s2, _ = bridge._get_or_create_session("ch1:u2")
         assert s1 is not s2
         assert bridge._session_locks["ch1:u1"] is not bridge._session_locks["ch1:u2"]
 
@@ -237,3 +244,312 @@ class TestWorkspaceOverride:
 
         await bridge.process("u1", "ch1", "test2", "text")
         assert mock_agent_cls.call_args[0][0] is bridge._base
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint callbacks (v1)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpointCallbacks:
+    @pytest.mark.asyncio
+    async def test_on_session_created_callback(self, bridge: AgentBridge, mock_agent_cls):
+        """New session triggers on_session_created callback inside lock."""
+        created_sessions: list[str] = []
+        async def _on_create(sid, session):
+            created_sessions.append(sid)
+
+        bridge.on_session_created(_on_create)
+        mock_agent_cls.return_value = _make_mock_agent(["ok"])
+
+        await bridge.process("u1", "ch1", "test", "text")
+        assert len(created_sessions) == 1
+        assert created_sessions[0] == "ch1:u1"
+
+    @pytest.mark.asyncio
+    async def test_on_session_evicted_callback_on_timeout(self, bridge: AgentBridge):
+        """Timeout cleanup triggers on_session_evicted callback."""
+        evicted: list[str] = []
+        async def _on_evict(sid, session):
+            evicted.append(sid)
+
+        bridge.on_session_evicted(_on_evict)
+
+        import time
+        sid = "ch1:u1"
+        session, _ = bridge._get_or_create_session(sid)
+        session.messages.append({"role": "user", "content": "hello"})
+
+        time.sleep(0.15)
+        bridge._get_or_create_session(sid)  # triggers eviction
+
+        # Give the fire-and-forget callback time to run
+        await asyncio.sleep(0.1)
+        assert sid in evicted
+
+    @pytest.mark.asyncio
+    async def test_on_session_evicted_callback_on_clear(self, bridge: AgentBridge):
+        """clear_session triggers on_session_evicted callback."""
+        evicted: list[str] = []
+        async def _on_evict(sid, session):
+            evicted.append(sid)
+
+        bridge.on_session_evicted(_on_evict)
+        bridge._get_or_create_session("ch1:u1")
+        bridge.clear_session("u1", "ch1")
+
+        await asyncio.sleep(0.1)
+        assert "ch1:u1" in evicted
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_callbacks_exception_isolation(self, bridge: AgentBridge, mock_agent_cls):
+        """One callback raising an exception does not block others or crash process."""
+        call_order: list[str] = []
+        async def _good(sid, session):
+            call_order.append("good")
+        async def _bad(sid, session):
+            call_order.append("bad")
+            raise RuntimeError("callback bug")
+
+        bridge.on_session_created(_bad)
+        bridge.on_session_created(_good)
+        mock_agent_cls.return_value = _make_mock_agent(["ok"])
+
+        # Should not crash
+        await bridge.process("u1", "ch1", "test", "text")
+        assert "good" in call_order
+        assert "bad" in call_order
+
+
+# ---------------------------------------------------------------------------
+# Shutdown (v1): graceful exit checkpoint persistence
+# ---------------------------------------------------------------------------
+
+
+class TestShutdown:
+    def test_shutdown_empty_sessions(self, bridge: AgentBridge):
+        """No active sessions → shutdown returns 0."""
+        assert bridge.shutdown() == 0
+
+    def test_shutdown_saves_checkpoints(self, bridge: AgentBridge, tmp_path, monkeypatch):
+        """shutdown writes .checkpoint.json for sessions with messages."""
+        from agent_core.persistence import path as ppath
+
+        home = tmp_path / "agent_home"
+        monkeypatch.setattr(ppath, "AGENT_HOME", str(home))
+        ws = str(tmp_path / "proj")
+        os.makedirs(ws, exist_ok=True)
+
+        # Set workspace_root so compute_project_hash uses tmp_path
+        bridge._base.workspace_root = ws
+
+        sid = "ch1:u1"
+        session, _ = bridge._get_or_create_session(sid)
+        session.messages.append(
+            {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+        )
+
+        saved = bridge.shutdown()
+        assert saved == 1
+
+        # Verify checkpoint file exists and contains correct data
+        project_hash = ppath.compute_project_hash(ws)
+        ckpt_path = ppath.checkpoint_json_path(
+            project_hash, "ch1_u1",
+        )
+        assert os.path.isfile(ckpt_path)
+        with open(ckpt_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        assert data["workspace_override"] is None
+        assert data["message_count"] == 1
+
+    def test_shutdown_sanitizes_session_id(self, bridge: AgentBridge, tmp_path, monkeypatch):
+        """session_id with ':', '\', '/' is sanitized to '_' in filename."""
+        from agent_core.persistence import path as ppath
+
+        home = tmp_path / "agent_home"
+        monkeypatch.setattr(ppath, "AGENT_HOME", str(home))
+        ws = str(tmp_path / "proj")
+        os.makedirs(ws, exist_ok=True)
+        bridge._base.workspace_root = ws
+
+        sid = "group123:user/abc\\def"
+        session, _ = bridge._get_or_create_session(sid)
+        session.messages.append(
+            {"role": "user", "content": "hi"},
+        )
+
+        bridge.shutdown()
+
+        project_hash = ppath.compute_project_hash(ws)
+        ckpt_path = ppath.checkpoint_json_path(
+            project_hash, "group123_user_abc_def",
+        )
+        assert os.path.isfile(ckpt_path)
+
+    def test_shutdown_skips_empty_sessions(self, bridge: AgentBridge):
+        """Sessions without messages are skipped."""
+        sid1 = "ch1:u1"
+        sid2 = "ch1:u2"
+        s1, _ = bridge._get_or_create_session(sid1)
+        s1.messages.append({"role": "user", "content": "present"})
+        bridge._get_or_create_session(sid2)  # no messages
+
+        saved = bridge.shutdown()
+        assert saved == 1  # only sid1 was saved
+
+    def test_shutdown_clears_sessions_after_save(self, bridge: AgentBridge, tmp_path, monkeypatch):
+        """After shutdown, _sessions dict is empty."""
+        from agent_core.persistence import path as ppath
+
+        home = tmp_path / "agent_home"
+        monkeypatch.setattr(ppath, "AGENT_HOME", str(home))
+        ws = str(tmp_path / "proj")
+        os.makedirs(ws, exist_ok=True)
+        bridge._base.workspace_root = ws
+
+        session, _ = bridge._get_or_create_session("ch1:u1")
+        session.messages.append({"role": "user", "content": "hi"})
+
+        bridge.shutdown()
+        assert len(bridge._sessions) == 0
+
+    def test_shutdown_exception_isolation(self, bridge: AgentBridge, tmp_path, monkeypatch):
+        """One session failing to save doesn't block others."""
+        from agent_core.persistence import path as ppath
+
+        home = tmp_path / "agent_home"
+        monkeypatch.setattr(ppath, "AGENT_HOME", str(home))
+        ws = str(tmp_path / "proj")
+        os.makedirs(ws, exist_ok=True)
+        bridge._base.workspace_root = ws
+
+        s1, _ = bridge._get_or_create_session("ch1:u1")
+        s1.messages.append({"role": "user", "content": "first"})
+        s2, _ = bridge._get_or_create_session("ch1:u2")
+        s2.messages.append({"role": "user", "content": "second"})
+
+        # Make one session's checkpoint_dict() fail
+        original_dict = s1.checkpoint_dict
+        def _broken():
+            raise RuntimeError("simulated failure")
+        s1.checkpoint_dict = _broken
+
+        try:
+            saved = bridge.shutdown()
+            # s2 should still be saved despite s1 failure
+            assert saved >= 1
+        finally:
+            s1.checkpoint_dict = original_dict
+
+    def test_shutdown_idempotent(self, bridge: AgentBridge, tmp_path, monkeypatch):
+        """Second shutdown call returns 0 (sessions already cleared)."""
+        from agent_core.persistence import path as ppath
+
+        home = tmp_path / "agent_home"
+        monkeypatch.setattr(ppath, "AGENT_HOME", str(home))
+        ws = str(tmp_path / "proj")
+        os.makedirs(ws, exist_ok=True)
+        bridge._base.workspace_root = ws
+
+        session, _ = bridge._get_or_create_session("ch1:u1")
+        session.messages.append({"role": "user", "content": "hi"})
+
+        first = bridge.shutdown()
+        assert first == 1
+        second = bridge.shutdown()
+        assert second == 0
+
+    def test_shutdown_with_workspace_override(self, bridge: AgentBridge, tmp_path, monkeypatch):
+        """Checkpoint includes workspace_override when set."""
+        from agent_core.persistence import path as ppath
+
+        home = tmp_path / "agent_home"
+        monkeypatch.setattr(ppath, "AGENT_HOME", str(home))
+        ws = str(tmp_path / "proj")
+        os.makedirs(ws, exist_ok=True)
+        bridge._base.workspace_root = ws
+
+        session, _ = bridge._get_or_create_session("ch1:u1")
+        session.messages.append({"role": "user", "content": "hi"})
+        session.workspace_override = "/custom/path"
+
+        bridge.shutdown()
+
+        project_hash = ppath.compute_project_hash(ws)
+        ckpt_path = ppath.checkpoint_json_path(project_hash, "ch1_u1")
+        with open(ckpt_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        assert data["workspace_override"] == "/custom/path"
+
+    def test_shutdown_with_permission_rules(self, bridge: AgentBridge, tmp_path, monkeypatch):
+        """Checkpoint includes session permission_rules."""
+        from agent_core.persistence import path as ppath
+
+        home = tmp_path / "agent_home"
+        monkeypatch.setattr(ppath, "AGENT_HOME", str(home))
+        ws = str(tmp_path / "proj")
+        os.makedirs(ws, exist_ok=True)
+        bridge._base.workspace_root = ws
+
+        session, _ = bridge._get_or_create_session("ch1:u1")
+        session.messages.append({"role": "user", "content": "hi"})
+        session.permission_store.add_allow("Bash")
+        session.permission_store.add_deny("Write")
+
+        bridge.shutdown()
+
+        project_hash = ppath.compute_project_hash(ws)
+        ckpt_path = ppath.checkpoint_json_path(project_hash, "ch1_u1")
+        with open(ckpt_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        assert len(data["permission_rules"]) == 2
+        actions = {r["action"] for r in data["permission_rules"]}
+        assert actions == {"allow", "deny"}
+
+    def test_shutdown_none_workspace_root(self, bridge: AgentBridge, tmp_path, monkeypatch):
+        """shutdown works when workspace_root is None (fallback to os.getcwd())."""
+        from agent_core.persistence import path as ppath
+
+        home = tmp_path / "agent_home"
+        monkeypatch.setattr(ppath, "AGENT_HOME", str(home))
+        # Don't set workspace_root — leave it as None (default)
+        bridge._base.workspace_root = None
+
+        session, _ = bridge._get_or_create_session("ch1:u1")
+        session.messages.append({"role": "user", "content": "hi"})
+
+        saved = bridge.shutdown()
+        assert saved == 1
+
+        # Verify checkpoint was written using the cwd-based project_hash
+        project_hash = ppath.compute_project_hash(None)
+        ckpt_path = ppath.checkpoint_json_path(project_hash, "ch1_u1")
+        assert os.path.isfile(ckpt_path)
+
+    def test_shutdown_title_extraction(self, bridge: AgentBridge, tmp_path, monkeypatch):
+        """Checkpoint title is extracted from first user message."""
+        from agent_core.persistence import path as ppath
+
+        home = tmp_path / "agent_home"
+        monkeypatch.setattr(ppath, "AGENT_HOME", str(home))
+        ws = str(tmp_path / "proj")
+        os.makedirs(ws, exist_ok=True)
+        bridge._base.workspace_root = ws
+
+        session, _ = bridge._get_or_create_session("ch1:u1")
+        session.messages.append(
+            {"role": "user", "content": [{"type": "text", "text": "帮我分析bug"}]},
+        )
+        session.messages.append(
+            {"role": "assistant", "content": [{"type": "text", "text": "好的"}]},
+        )
+
+        bridge.shutdown()
+
+        project_hash = ppath.compute_project_hash(ws)
+        ckpt_path = ppath.checkpoint_json_path(project_hash, "ch1_u1")
+        with open(ckpt_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        assert data["title"] == "帮我分析bug"
+        assert data["message_count"] == 2

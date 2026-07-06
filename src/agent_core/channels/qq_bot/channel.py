@@ -8,12 +8,17 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+import sys
+from pathlib import Path
+from typing import Any, TYPE_CHECKING
 
 from agent_core.models import AgentConfig
 
 from .client import QQBotClient
 from .types import QQBotConfig
+
+if TYPE_CHECKING:
+    from agent_core.session import SessionState
 
 logger = logging.getLogger("agent_core.qq_bot.channel")
 
@@ -27,6 +32,7 @@ QQBot 可用指令:
   /cd --reset     重置为默认工作目录
   /ls [路径]      列出目录内容（一级，可选子路径）
   /clear          清除对话历史
+  /restart        重启服务（使配置更改生效）
   /help           显示此帮助"""
 
 
@@ -47,8 +53,9 @@ def _load_global_agent_config() -> AgentConfig | None:
 class QQBotChannel:
     """QQ 机器人信道调度器。"""
 
-    def __init__(self, config: QQBotConfig) -> None:
+    def __init__(self, config: QQBotConfig, config_path: Path | None = None) -> None:
         self._config = config
+        self._config_path = config_path
         self._client: QQBotClient | None = None
 
         base_agent_config = _load_global_agent_config()
@@ -58,6 +65,107 @@ class QQBotChannel:
             self._agent_config,
             system_prompt=config.system_prompt,
         )
+        # Register checkpoint callbacks
+        self._bridge.on_session_created(self._on_qqbot_session_created)
+        self._bridge.on_session_evicted(self._on_qqbot_session_evicted)
+
+    # ------------------------------------------------------------------
+    # Checkpoint (v1)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _checkpoint_key(bridge_sid: str) -> str:
+        """将 bridge session_id 转换为安全的文件名 key。"""
+        return bridge_sid.replace(":", "_").replace("\\", "_").replace("/", "_")
+
+    async def _on_qqbot_session_created(
+        self, sid: str, session: "SessionState",
+    ) -> None:
+        """从 JSONL 和 checkpoint 恢复 QQBot session 的完整状态。
+
+        1. JSONL → 恢复 messages、_written_count、_compaction_count
+        2. checkpoint → 恢复 workspace_override、permission_rules、时间戳
+        3. 挂载 JSONL writer，使后续 flush_new_messages 能增量写入磁盘
+        """
+        ck_key = self._checkpoint_key(sid)
+        ws_root = self._agent_config.workspace_root
+
+        # 1) 先恢复 checkpoint 元数据（workspace_override、permission_rules 等）
+        from agent_core.persistence.session import load_session, load_checkpoint
+        ckpt = await load_checkpoint(
+            ck_key, workspace_root=ws_root,
+        )
+        if ckpt is not None:
+            session.restore_checkpoint(ckpt)
+
+        # 2) 从 JSONL 恢复对话历史 — 但当 checkpoint 显示 session 已被 /clear
+        #    清空（message_count == 0）时跳过，避免旧消息"复活"
+        if ckpt is None or int(ckpt.get("message_count", -1)) > 0:
+            loaded = await load_session(
+                ck_key, workspace_root=ws_root,
+            )
+            if loaded is not None:
+                session.messages = loaded.messages
+                session._written_count = loaded._written_count
+                session._compaction_count = loaded._compaction_count
+
+        # 3) 挂载 JSONL writer — 关键：没有这一步，flush_new_messages 全程是 no-op，
+        #    新消息永远不会落盘，导致 checkpoint.message_count 远大于 JSONL 实际条目数
+        from agent_core.persistence.path import compute_project_hash, session_jsonl_path
+        ph = compute_project_hash(ws_root)
+        jsonl_path = session_jsonl_path(ph, ck_key)
+        await session.begin_persistence(jsonl_path)
+
+    async def _on_qqbot_session_evicted(
+        self, sid: str, session: "SessionState",
+    ) -> None:
+        """QQBot session 超时/清理前保存 checkpoint + JSONL。
+
+        顺序：先关 JSONL（flush 剩余消息到磁盘），再写 checkpoint。
+        这样 checkpoint 的 written_count 与 JSONL 实际条目数一致。
+        """
+        if not session.messages:
+            return  # 空 session 不存档
+
+        from agent_core.persistence.path import (
+            compute_project_hash,
+            session_jsonl_path,
+        )
+        from agent_core.persistence.session import save_checkpoint
+
+        ck_key = self._checkpoint_key(sid)
+        ph = compute_project_hash(self._agent_config.workspace_root)
+        jsonl_path = session_jsonl_path(ph, ck_key)
+
+        # /clear 后 _written_count 回到 0，旧 JSONL 数据已过时；
+        # 删除它避免旧消息在下次 resume 时复活
+        if session._written_count == 0 and os.path.exists(jsonl_path):
+            os.unlink(jsonl_path)
+
+        # 1) 先关闭 JSONL writer，flush 剩余消息到磁盘
+        await session.end_persistence()
+
+        # 2) 再保存 checkpoint（此时 JSONL 已完整，written_count 准确）
+        await save_checkpoint(
+            session,
+            checkpoint_key=ck_key,
+            workspace_root=self._agent_config.workspace_root,
+        )
+
+    async def _save_workspace_checkpoint(
+        self, user_id: str, channel_id: str, session: "SessionState",
+    ) -> None:
+        """/cd 或 /cd --reset 后即时保存 workspace_override 到 checkpoint。"""
+        from agent_core.persistence.session import save_checkpoint
+        bridge_sid = self._bridge.session_id(user_id, channel_id)
+        try:
+            await save_checkpoint(
+                session,
+                checkpoint_key=self._checkpoint_key(bridge_sid),
+                workspace_root=self._agent_config.workspace_root,
+            )
+        except Exception:
+            logger.exception("Failed to save checkpoint after /cd")
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -137,6 +245,8 @@ class QQBotChannel:
             await self._handle_ls_command(user_id, channel_id, content)
         elif content == "/clear":
             await self._handle_clear_command(user_id, channel_id)
+        elif content == "/restart":
+            await self._handle_restart_command(user_id, channel_id)
         elif content == "/help":
             await self._handle_help_command(user_id, channel_id)
         else:
@@ -230,6 +340,7 @@ class QQBotChannel:
         if arg == "--reset":
             session.workspace_override = None
             session.clear_history()
+            await self._save_workspace_checkpoint(user_id, channel_id, session)
             default = self._agent_config.workspace_root or os.getcwd()
             await self._send_message(
                 user_id, channel_id,
@@ -245,6 +356,7 @@ class QQBotChannel:
 
         session.workspace_override = new_path
         session.clear_history()
+        await self._save_workspace_checkpoint(user_id, channel_id, session)
         await self._send_message(
             user_id, channel_id,
             f"工作目录已切换至: {new_path}\n对话历史已重置。",
@@ -318,10 +430,59 @@ class QQBotChannel:
     async def _handle_clear_command(
         self, user_id: str, channel_id: str,
     ) -> None:
-        """处理 /clear 指令：清除对话历史。"""
+        """处理 /clear 指令：清除对话历史并即时保存 checkpoint，
+        防止旧消息在 session 重建时从 JSONL 复活。"""
         session = self._bridge.get_session(user_id, channel_id)
         session.clear_history()
+        await self._save_workspace_checkpoint(user_id, channel_id, session)
         await self._send_message(user_id, channel_id, "对话历史已清除。")
+
+    # ------------------------------------------------------------------
+    # /restart
+    # ------------------------------------------------------------------
+
+    async def _handle_restart_command(
+        self, user_id: str, channel_id: str,
+    ) -> None:
+        """处理 /restart 指令：以 os.execv 替换当前进程来重启。
+
+        os.execv 会用新进程替换当前进程，保留 pid 和命令行参数。
+        所有 WebSocket 连接由 OS 在新进程中重建，配置文件的更改会生效。
+        如有外部 supervisor（systemd/pm2/shell loop）也能协同工作。
+        """
+        logger.info("QQBot /restart from user=%s channel=%s", user_id, channel_id)
+        await self._send_message(user_id, channel_id, "正在重启服务，请稍候...")
+
+        # 给消息发送和 IO 刷新留一点时间
+        import asyncio
+        await asyncio.sleep(1.5)
+
+        # 通过环境变量告知新进程：启动后向此用户发送"重启完成"通知
+        import json
+        os.environ["QQ_BOT_RESTART_NOTIFY"] = json.dumps({
+            "user_id": user_id,
+            "channel_id": channel_id,
+        })
+
+        # 重建启动参数：过滤原始 --config，替换为解析后的绝对路径。
+        # 用 sys.argv[0]（原始入口，如 venv/Scripts/agent-core-qqbot.exe）启动，
+        # 而非 sys.executable，确保 venv 环境正确加载。
+        filtered_args: list[str] = []
+        skip_next = False
+        for arg in sys.argv[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "--config":
+                skip_next = True
+                continue
+            filtered_args.append(arg)
+
+        restart_argv = [sys.argv[0], *filtered_args]
+        if self._config_path is not None:
+            restart_argv.extend(["--config", str(self._config_path)])
+
+        os.execv(sys.argv[0], restart_argv)
 
     # ------------------------------------------------------------------
     # /help

@@ -539,6 +539,23 @@ class DoneMessage(BaseModel):
     )
 
 
+
+
+class FlushMessage(BaseModel):
+    """Mid-turn persistence boundary emitted right before tool execution.
+
+    Carries the current message list so the session layer can flush
+    accumulated messages to JSONL *before* tools run.  This creates a
+    recoverable save-point at every tool-call boundary: if the process
+    is killed during tool execution, the JSONL is complete up to the
+    assistant message that requested the tool(s).
+    """
+
+    type: Literal["flush"] = "flush"
+    messages: list[dict[str, Any]] = Field(
+        description="Current message list at the tool-execution boundary.",
+    )
+
 class CompactMessage(BaseModel):
     """Compression event notification emitted during the agent stream.
 
@@ -559,6 +576,6 @@ class CompactMessage(BaseModel):
 
 
 AgentMessage = Annotated[
-    AssistantText | ToolUse | ToolResult | ErrorMessage | DoneMessage | CompactMessage,
+    AssistantText | ToolUse | ToolResult | ErrorMessage | DoneMessage | FlushMessage | CompactMessage,
     Field(discriminator="type"),
 ]

@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time as _time_module
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,7 @@ Commands:
   /model <provider/name>   Switch model (e.g. /model openai/gpt-4o)
   /key <provider> <key>    Set API key for a provider
   /clear                   Clear conversation history (keeps session permissions)
+  /checkpoint              Save a session checkpoint (workspace + permissions)
   /skills                  List loaded skills
   /sessions                List saved sessions (--resume <id> to restore)
   /logs                    Show conversation-log metrics for this session
@@ -114,6 +116,60 @@ def _handle_command(config: AgentConfig, text: str) -> bool:
 
     print(f"Unknown command: {cmd}. Type /help for available commands.")
     return False
+
+
+async def _interactive_session_picker(config: AgentConfig) -> "SessionState | None":
+    """显示最近会话列表，让用户选择继续或新建。
+
+    Returns:
+        SessionState if user chose to resume, None to start fresh.
+    """
+    from ..persistence.session import list_sessions as _pers_list
+    from ..persistence.session import load_session_full as _pers_load_full
+    from ..persistence.path import compute_project_hash, session_jsonl_path
+
+    sessions = await _pers_list(config.workspace_root)
+    if not sessions:
+        return None
+
+    print("\n  最近会话:")
+    for i, s in enumerate(sessions[:10], 1):
+        ws_info = ""
+        if s.workspace_override:
+            root = config.workspace_root or os.getcwd()
+            try:
+                rel = os.path.relpath(s.workspace_override, root)
+                ws_info = f", {rel}/"
+            except ValueError:
+                ws_info = f", {s.workspace_override}"
+        print(
+            f"  [{i}] {s.title:<32s} {s.last_activity[:19]}  "
+            f"({s.message_count} msgs{ws_info})"
+        )
+
+    print(f"\n  输入编号继续，或直接回车开始新会话 > ", end="")
+    try:
+        choice = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(sessions):
+            s = sessions[idx]
+            session = await _pers_load_full(
+                s.session_id, workspace_root=config.workspace_root,
+            )
+            if session is not None:
+                ph = compute_project_hash(config.workspace_root)
+                tpath = session_jsonl_path(ph, session.session_id)
+                await session.begin_persistence(tpath)
+                return session
+            else:
+                print(f"[session {s.session_id[:8]}... data missing, starting fresh]")
+
+    return None
 
 
 async def _list_sessions_cmd(config: AgentConfig) -> None:
@@ -238,7 +294,7 @@ async def _repl(
 
     if resume_id is not None or continue_last:
         from ..persistence.session import list_sessions as _pers_list
-        from ..persistence.session import load_session as _pers_load
+        from ..persistence.session import load_session_full as _pers_load_full
 
         if continue_last:
             sessions = await _pers_list(config.workspace_root)
@@ -246,8 +302,8 @@ async def _repl(
                 resume_id = sessions[0].session_id
 
         if resume_id:
-            loaded = await _pers_load(
-                resume_id, workspace_root=config.workspace_root
+            loaded = await _pers_load_full(
+                resume_id, workspace_root=config.workspace_root,
             )
             if loaded is not None:
                 session = loaded
@@ -255,22 +311,34 @@ async def _repl(
                     f"[resumed session {resume_id[:8]}... "
                     f"({len(session.messages)} messages)]"
                 )
-                print(
-                    "[note: session permission memory is not restored "
-                    "across sessions — you may be re-prompted for tool approvals]"
-                )
+                if session.workspace_override:
+                    print(f"[workspace: {session.workspace_override}]")
             else:
                 print(
                     f"[session {resume_id[:8]}... not found, starting fresh]"
                 )
+    elif sys.stdin.isatty():
+        # Interactive mode with no explicit resume — show session picker
+        picked = await _interactive_session_picker(config)
+        if picked is not None:
+            session = picked
+            print(
+                f"[resumed session {session.session_id[:8]}... "
+                f"({len(session.messages)} messages)]"
+            )
+            if session.workspace_override:
+                print(f"[workspace: {session.workspace_override}]")
 
     from ..persistence.path import compute_project_hash, session_jsonl_path
+    from ..persistence.session import save_checkpoint
 
     ph = compute_project_hash(config.workspace_root)
     tpath = session_jsonl_path(ph, session.session_id)
     await session.begin_persistence(tpath)
 
     try:
+        _last_cancel_ts: float | None = None  # 双 Ctrl+C 检测计时器
+
         while True:
             try:
                 if sys.stdin.isatty():
@@ -294,6 +362,14 @@ async def _repl(
                     session._written_count = len(session.messages)
                     print("[history cleared]")
                     continue
+                if cmd_parts[0].lower() == "/checkpoint":
+                    await save_checkpoint(
+                        session, workspace_root=config.workspace_root,
+                    )
+                    print(
+                        f"[checkpoint saved — {len(session.messages)} messages]"
+                    )
+                    continue
                 if cmd_parts[0].lower() == "/sessions":
                     await _list_sessions_cmd(config)
                     continue
@@ -301,6 +377,10 @@ async def _repl(
                     await _show_logs_cmd(config, session.session_id)
                     continue
                 if _handle_command(config, prompt):
+                    # /quit: save checkpoint before exiting
+                    await save_checkpoint(
+                        session, workspace_root=config.workspace_root,
+                    )
                     break
                 continue
 
@@ -339,13 +419,24 @@ async def _repl(
                     elif msg.type == "done":
                         print(f"\n--- {msg.stop_reason} | {msg.total_tokens} tokens ---")
             except KeyboardInterrupt:
+                now = _time_module.monotonic()
+                if _last_cancel_ts is not None and now - _last_cancel_ts < 2.0:
+                    print("\n[cancelled — exiting]")
+                    break
+                _last_cancel_ts = now
                 print("\n[cancelled]")
             except Exception as exc:
                 print(f"\n[exception] {type(exc).__name__}: {exc}")
             finally:
                 await stream.aclose()
                 await agent.aclose()
+
+            # 正常完成一轮 → 重置计时器
+            _last_cancel_ts = None
     finally:
+        await save_checkpoint(
+            session, workspace_root=config.workspace_root,
+        )
         await session.end_persistence()
 
 

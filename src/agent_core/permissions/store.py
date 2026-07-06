@@ -47,6 +47,19 @@ class SessionPermissionStore:
     def clear(self) -> None:
         self._rules.clear()
 
+    def to_rules_list(self) -> list[dict[str, object]]:
+        """Export all remembered rules as JSON-serializable dicts."""
+        return [r.model_dump() for r in self._rules]
+
+    def restore_from_rules(self, rules: list[dict[str, object]]) -> None:
+        """Import rules from a previously exported list (idempotent)."""
+        for r_dict in rules:
+            rule = PermissionRule.model_validate(r_dict)
+            dumped = rule.model_dump()
+            if any(r.model_dump() == dumped for r in self._rules):
+                continue
+            self._rules.append(rule)
+
     # -- internal -----------------------------------------------------------
 
     def _add(

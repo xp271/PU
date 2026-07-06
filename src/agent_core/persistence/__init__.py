@@ -7,6 +7,7 @@ Public API
 **Path utilities**::
 
     from agent_core.persistence import (
+        checkpoint_json_path,
         compute_project_hash,
         session_jsonl_path,
         sidechain_dir,
@@ -27,8 +28,16 @@ Public API
         SessionInfo,
         list_sessions,
         load_session,
+        load_session_full,
         delete_session,
         cleanup_old_sessions,
+    )
+
+**Checkpoint**::
+
+    from agent_core.persistence import (
+        save_checkpoint,
+        load_checkpoint,
     )
 
 **Recovery**::
@@ -46,6 +55,7 @@ Public API
 
 from .migrate import migrate_transcript
 from .path import (
+    checkpoint_json_path,
     compute_project_hash,
     session_jsonl_path,
     sidechain_dir,
@@ -61,7 +71,10 @@ from .session import (
     cleanup_old_sessions,
     delete_session,
     list_sessions,
+    load_checkpoint,
     load_session,
+    load_session_full,
+    save_checkpoint,
 )
 from .storage import (
     CompactionRecord,
@@ -71,6 +84,7 @@ from .storage import (
 
 __all__ = [
     # path
+    "checkpoint_json_path",
     "compute_project_hash",
     "session_jsonl_path",
     "sidechain_dir",
@@ -87,8 +101,12 @@ __all__ = [
     "SessionInfo",
     "list_sessions",
     "load_session",
+    "load_session_full",
     "delete_session",
     "cleanup_old_sessions",
+    # checkpoint
+    "save_checkpoint",
+    "load_checkpoint",
     # migrate
     "migrate_transcript",
 ]
