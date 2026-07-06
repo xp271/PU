@@ -156,7 +156,7 @@ class QQBotChannel:
     # 路径解析
     # ------------------------------------------------------------------
 
-    def _resolve_path(
+    async def _resolve_path(
         self, user_id: str, channel_id: str, arg: str,
     ) -> tuple[str | None, str | None]:
         """解析相对于当前 effective workspace 的路径。
@@ -167,7 +167,7 @@ class QQBotChannel:
             - error_msg 非 None → 路径不合法，resolved_path 为 None
             - arg 为空字符串 → 返回 (effective, None)，调用方决定行为
         """
-        session = self._bridge.get_session(user_id, channel_id)
+        session = await self._bridge.get_session(user_id, channel_id)
         effective = (
             session.workspace_override
             or self._agent_config.workspace_root
@@ -212,7 +212,7 @@ class QQBotChannel:
             )
             return
 
-        session = self._bridge.get_session(user_id, channel_id)
+        session = await self._bridge.get_session(user_id, channel_id)
         arg = content[len("/cd"):].strip()
 
         # 无参：显示当前
@@ -244,7 +244,7 @@ class QQBotChannel:
             return
 
         # 切换
-        new_path, err = self._resolve_path(user_id, channel_id, arg)
+        new_path, err = await self._resolve_path(user_id, channel_id, arg)
         if err is not None:
             await self._send_message(user_id, channel_id, err)
             return
@@ -271,7 +271,7 @@ class QQBotChannel:
             return
 
         arg = content[len("/ls"):].strip()
-        target, err = self._resolve_path(user_id, channel_id, arg)
+        target, err = await self._resolve_path(user_id, channel_id, arg)
         if err is not None:
             await self._send_message(user_id, channel_id, err)
             return
@@ -325,7 +325,7 @@ class QQBotChannel:
         self, user_id: str, channel_id: str,
     ) -> None:
         """处理 /clear 指令：清除对话历史。"""
-        session = self._bridge.get_session(user_id, channel_id)
+        session = await self._bridge.get_session(user_id, channel_id)
         session.clear_history()
         await self._send_message(user_id, channel_id, "对话历史已清除。")
 
