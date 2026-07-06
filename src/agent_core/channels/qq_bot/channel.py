@@ -79,8 +79,12 @@ class QQBotChannel:
         # 才能拿到正确的 loop（botpy 构造时内部会调 get_event_loop）。
         def _run_bot():
             import asyncio as _asyncio
+            import concurrent.futures
             _loop = _asyncio.new_event_loop()
             _asyncio.set_event_loop(_loop)
+            # 显式创建 executor，防止 os.execv 后新进程残留已 shutdown
+            # 的 executor 状态，导致 WebSocket 连接的 DNS 解析失败
+            _loop.set_default_executor(concurrent.futures.ThreadPoolExecutor())
             client = QQBotClient(self)
             self._client = client
             _loop.run_until_complete(client.start(
