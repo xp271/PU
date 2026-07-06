@@ -61,8 +61,10 @@ _CONFIG_TEMPLATE = """{
 # ---------------------------------------------------------------------------
 
 
-def _load_qqbot_config(config_path: str | None, cli_overrides: dict[str, str]) -> QQBotConfig:
-    """加载 QQ 机器人配置。
+def _load_qqbot_config(
+    config_path: str | None, cli_overrides: dict[str, str],
+) -> tuple[QQBotConfig, Path | None]:
+    """加载 QQ 机器人配置。返回 (配置, 解析后的配置文件路径)。
 
     优先级：配置文件 < 环境变量 < CLI 参数。
     如果环境变量已提供 app_id 和 app_secret，配置文件不是必需的。
@@ -70,7 +72,7 @@ def _load_qqbot_config(config_path: str | None, cli_overrides: dict[str, str]) -
     raw: dict[str, Any] = {}
 
     # 1. 读配置文件
-    path = Path(config_path) if config_path else _find_config_file()
+    path = Path(config_path).resolve() if config_path else _find_config_file()
     if path is not None and path.is_file():
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -104,7 +106,7 @@ def _load_qqbot_config(config_path: str | None, cli_overrides: dict[str, str]) -
         sys.exit(1)
 
     try:
-        return QQBotConfig(**qqbot_raw)
+        return QQBotConfig(**qqbot_raw), path
     except ValidationError as exc:
         print(f"[qqbot] Invalid config: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -153,9 +155,16 @@ def _cmd_init(config_path: str | None) -> None:
     print(f"  agent-core-qqbot start --config {target}")
 
 
-async def _cmd_start(config_path: str | None, cli_overrides: dict[str, str]) -> None:
-    """启动 QQ 机器人。"""
-    config = _load_qqbot_config(config_path, cli_overrides)
+async def _cmd_start(
+    config_path: str | None,
+    cli_overrides: dict[str, str],
+    restart_notify: tuple[str, str] | None = None,
+) -> None:
+    """启动 QQ 机器人。
+
+    restart_notify: (user_id, channel_id) — 重启完成后向此用户发送通知。
+    """
+    config, resolved_path = _load_qqbot_config(config_path, cli_overrides)
 
     # 日志：同时输出到控制台和项目目录下的 logs/qqbot.log
     _setup_logging()
@@ -167,7 +176,7 @@ async def _cmd_start(config_path: str | None, cli_overrides: dict[str, str]) -> 
 
     from ..channels.qq_bot.channel import QQBotChannel
 
-    channel = QQBotChannel(config)
+    channel = QQBotChannel(config, resolved_path)
     logger.info(f"starting QQ bot (app_id={config.app_id[:8]}...)")
 
     try:
@@ -216,12 +225,16 @@ def _setup_logging() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _parse_args(argv: list[str]) -> tuple[str | None, str | None, str | None, str | None]:
-    """解析命令行参数。返回 (command, config_path, model, system_prompt)。"""
+def _parse_args(
+    argv: list[str],
+) -> tuple[str | None, str | None, str | None, str | None, tuple[str, str] | None]:
+    """解析命令行参数。返回 (command, config_path, model, system_prompt, restart_notify)。"""
     command: str | None = None
     config_path: str | None = None
     model: str | None = None
     system_prompt: str | None = None
+    restart_user: str | None = None
+    restart_channel: str | None = None
 
     i = 0
     while i < len(argv):
@@ -237,18 +250,28 @@ def _parse_args(argv: list[str]) -> tuple[str | None, str | None, str | None, st
         elif arg == "--system-prompt" and i + 1 < len(argv):
             i += 1
             system_prompt = argv[i]
+        elif arg == "--restart-notify" and i + 2 < len(argv):
+            i += 1
+            restart_user = argv[i]
+            i += 1
+            restart_channel = argv[i]
         elif arg in ("-h", "--help"):
             command = "help"
         elif command is None:
             command = arg
         i += 1
 
-    return command, config_path, model, system_prompt
+    restart_notify = None
+    if restart_user is not None and restart_channel is not None:
+        restart_notify = (restart_user, restart_channel)
+
+    return command, config_path, model, system_prompt, restart_notify
 
 
 def main() -> None:
     """CLI entry point (agent-core-qqbot console script)."""
-    command, config_path, model, system_prompt = _parse_args(sys.argv[1:])
+    command, config_path, model, system_prompt, restart_notify = \
+        _parse_args(sys.argv[1:])
 
     if command == "init":
         _cmd_init(config_path)
@@ -258,7 +281,7 @@ def main() -> None:
             cli_overrides["model"] = model
         if system_prompt:
             cli_overrides["system_prompt"] = system_prompt
-        asyncio.run(_cmd_start(config_path, cli_overrides))
+        asyncio.run(_cmd_start(config_path, cli_overrides, restart_notify))
     else:
         print(
             "Usage:\n"

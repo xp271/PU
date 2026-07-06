@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
+from pathlib import Path
 from typing import Any
 
 from agent_core.models import AgentConfig
@@ -27,6 +29,7 @@ QQBot 可用指令:
   /cd --reset     重置为默认工作目录
   /ls [路径]      列出目录内容（一级，可选子路径）
   /clear          清除对话历史
+  /restart        重启服务（使配置更改生效）
   /help           显示此帮助"""
 
 
@@ -47,8 +50,9 @@ def _load_global_agent_config() -> AgentConfig | None:
 class QQBotChannel:
     """QQ 机器人信道调度器。"""
 
-    def __init__(self, config: QQBotConfig) -> None:
+    def __init__(self, config: QQBotConfig, config_path: Path | None = None) -> None:
         self._config = config
+        self._config_path = config_path
         self._client: QQBotClient | None = None
 
         base_agent_config = _load_global_agent_config()
@@ -137,6 +141,8 @@ class QQBotChannel:
             await self._handle_ls_command(user_id, channel_id, content)
         elif content == "/clear":
             await self._handle_clear_command(user_id, channel_id)
+        elif content == "/restart":
+            await self._handle_restart_command(user_id, channel_id)
         elif content == "/help":
             await self._handle_help_command(user_id, channel_id)
         else:
@@ -324,6 +330,47 @@ class QQBotChannel:
         await self._send_message(user_id, channel_id, "对话历史已清除。")
 
     # ------------------------------------------------------------------
+    # /restart
+    # ------------------------------------------------------------------
+
+    async def _handle_restart_command(
+        self, user_id: str, channel_id: str,
+    ) -> None:
+        """处理 /restart 指令：以 os.execv 替换当前进程来重启。
+
+        os.execv 会用新进程替换当前进程，保留 pid 和 CWD。
+        通过 --restart-notify CLI 参数将通知信息传给新进程，
+        新进程启动后会向发起重启的用户发送"重启完成"消息。
+        """
+        logger.info("QQBot /restart from user=%s channel=%s", user_id, channel_id)
+
+        # 发送"正在重启"（best-effort，失败不影响重启；新进程 on_ready 会发最终通知）
+        try:
+            await self._send_message(user_id, channel_id, "正在重启服务，请稍候...")
+        except Exception:
+            logger.debug("failed to send restarting message", exc_info=True)
+
+        # 重建启动参数：过滤旧的 --config / --restart-notify，
+        # 替换为解析后的绝对路径和新通知目标
+        filtered_args: list[str] = []
+        skip_next = False
+        for arg in sys.argv[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg in ("--config", "--restart-notify"):
+                skip_next = True
+                continue
+            filtered_args.append(arg)
+
+        restart_argv = [sys.argv[0], *filtered_args]
+        if self._config_path is not None:
+            restart_argv.extend(["--config", str(self._config_path)])
+        restart_argv.extend(["--restart-notify", user_id, channel_id])
+
+        os.execv(sys.argv[0], restart_argv)
+
+    # ------------------------------------------------------------------
     # /help
     # ------------------------------------------------------------------
 
@@ -348,3 +395,4 @@ class QQBotChannel:
             await api.post_c2c_message(openid=user_id, msg_type=0, content=content)
         else:
             await api.post_group_message(group_openid=channel_id, msg_type=0, content=content)
+
