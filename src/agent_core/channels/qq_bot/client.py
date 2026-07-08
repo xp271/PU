@@ -75,3 +75,20 @@ class QQBotClient(botpy.Client):
             content=message.content or "",
             msg_type="text",
         )
+
+    async def on_ready(self) -> None:
+        """WebSocket 就绪时回调。
+
+        如果是 /restart 触发的重启，发送"重启完成"通知。
+        此时 WebSocket 和 HTTP 客户端均已就绪，消息必定能发出。
+        """
+        import sys as _sys
+        argv = _sys.argv
+        for i, arg in enumerate(argv):
+            if arg == "--restart-notify" and i + 2 < len(argv):
+                user_id = argv[i + 1]
+                channel_id = argv[i + 2]
+                await self._channel._send_message(
+                    user_id, channel_id, "服务重启完成。",
+                )
+                break

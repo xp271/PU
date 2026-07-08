@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
+from pathlib import Path
 from typing import Any
 
 from agent_core.models import AgentConfig
@@ -23,19 +25,33 @@ logger = logging.getLogger("agent_core.qq_bot.channel")
 
 _QQBOT_HELP = """\
 QQBot 可用指令:
-  /cd [路径]      切换工作目录（支持相对/绝对路径，.. 返回上级）
-  /cd --reset     重置为默认工作目录
+  /cdp [路径]     切换工作目录（支持相对/绝对路径，.. 返回上级）
+  /cdp --reset    重置为默认工作目录
   /ls [路径]      列出目录内容（一级，可选子路径）
   /clear          清除对话历史
+  /restart        重启服务（使配置更改生效）
   /help           显示此帮助"""
 
 
-def _load_global_agent_config() -> AgentConfig | None:
-    """从 agent-core.config.json 加载基础 AgentConfig，复用 CLI 的加载逻辑。"""
+def _load_global_agent_config(config_path: Path | None = None) -> AgentConfig | None:
+    """从 agent-core.config.json 加载基础 AgentConfig，复用 CLI 的加载逻辑。
+
+    config_path 指定后优先使用，避免 auto-discover 找到错误文件。
+    返回 None 表示加载失败（配置缺失或 API key 未设置），调用方应记录错误。
+    """
     from agent_core.cli._config import _find_config_file, _load_config  # noqa: PLC0415
     try:
-        return _load_config()
+        if config_path is not None:
+            cfg = _load_config(config_path_override=str(config_path.resolve()))
+        else:
+            cfg = _load_config()
+        logger.debug("Agent config loaded: model=%s", cfg.model)
+        return cfg
     except SystemExit:
+        logger.error(
+            "_load_global_agent_config failed: config_path=%s",
+            config_path,
+        )
         return None
 
 
@@ -47,12 +63,24 @@ def _load_global_agent_config() -> AgentConfig | None:
 class QQBotChannel:
     """QQ 机器人信道调度器。"""
 
-    def __init__(self, config: QQBotConfig) -> None:
+    def __init__(self, config: QQBotConfig, config_path: Path | None = None) -> None:
         self._config = config
+        self._config_path = config_path
         self._client: QQBotClient | None = None
 
-        base_agent_config = _load_global_agent_config()
+        base_agent_config = _load_global_agent_config(config_path)
+        if base_agent_config is None:
+            logger.warning(
+                "Failed to load agent config (config_path=%s); "
+                "using defaults — API keys may be missing",
+                config_path,
+            )
         self._agent_config = config.to_agent_config(base_agent_config)
+        logger.info(
+            "QQBotChannel initialized: model=%s, api_keys=%s",
+            self._agent_config.model,
+            list(self._agent_config.api_keys.keys()),
+        )
         from agent_core.bridge.agent_bridge import AgentBridge
         self._bridge = AgentBridge(
             self._agent_config,
@@ -75,8 +103,12 @@ class QQBotChannel:
         # 才能拿到正确的 loop（botpy 构造时内部会调 get_event_loop）。
         def _run_bot():
             import asyncio as _asyncio
+            import concurrent.futures
             _loop = _asyncio.new_event_loop()
             _asyncio.set_event_loop(_loop)
+            # 显式创建 executor，防止 os.execv 后新进程残留已 shutdown
+            # 的 executor 状态，导致 WebSocket 连接的 DNS 解析失败
+            _loop.set_default_executor(concurrent.futures.ThreadPoolExecutor())
             client = QQBotClient(self)
             self._client = client
             _loop.run_until_complete(client.start(
@@ -87,7 +119,17 @@ class QQBotChannel:
         await asyncio.to_thread(_run_bot)
 
     async def stop(self) -> None:
-        pass  # botpy 内部管理连接生命周期
+        """关闭 botpy WebSocket 连接。
+
+        os.execv 在 Windows 上走 _exit(0)，不会等 WebSocket 优雅关闭，
+        导致新旧进程同时持有连接 → QQ Bot API 返回 4903 冲突。
+        这里显式 close 后再 execv，避免双连接竞态。
+        """
+        if self._client is not None:
+            try:
+                await self._client.close()
+            except Exception:
+                logger.exception("error closing botpy client")
 
     # ------------------------------------------------------------------
     # 消息处理
@@ -131,12 +173,14 @@ class QQBotChannel:
         self, user_id: str, channel_id: str, content: str,
     ) -> None:
         """将 shell 指令分发到对应处理器。"""
-        if content.startswith("/cd"):
+        if content.startswith("/cdp"):
             await self._handle_cd_command(user_id, channel_id, content)
         elif content.startswith("/ls"):
             await self._handle_ls_command(user_id, channel_id, content)
         elif content == "/clear":
             await self._handle_clear_command(user_id, channel_id)
+        elif content == "/restart":
+            await self._handle_restart_command(user_id, channel_id)
         elif content == "/help":
             await self._handle_help_command(user_id, channel_id)
         else:
@@ -150,7 +194,7 @@ class QQBotChannel:
     # 路径解析
     # ------------------------------------------------------------------
 
-    def _resolve_path(
+    async def _resolve_path(
         self, user_id: str, channel_id: str, arg: str,
     ) -> tuple[str | None, str | None]:
         """解析相对于当前 effective workspace 的路径。
@@ -161,7 +205,7 @@ class QQBotChannel:
             - error_msg 非 None → 路径不合法，resolved_path 为 None
             - arg 为空字符串 → 返回 (effective, None)，调用方决定行为
         """
-        session = self._bridge.get_session(user_id, channel_id)
+        session = await self._bridge.get_session(user_id, channel_id)
         effective = (
             session.workspace_override
             or self._agent_config.workspace_root
@@ -193,21 +237,21 @@ class QQBotChannel:
         return target, None
 
     # ------------------------------------------------------------------
-    # /cd
+    # /cdp
     # ------------------------------------------------------------------
 
     async def _handle_cd_command(
         self, user_id: str, channel_id: str, content: str,
     ) -> None:
-        """处理 /cd 指令：查看、切换或重置工作目录。"""
+        """处理 /cdp 指令：查看、切换或重置工作目录。"""
         if not self._config.allow_shell_commands:
             await self._send_message(
                 user_id, channel_id, "Shell 指令功能未启用。",
             )
             return
 
-        session = self._bridge.get_session(user_id, channel_id)
-        arg = content[len("/cd"):].strip()
+        session = await self._bridge.get_session(user_id, channel_id)
+        arg = content[len("/cdp"):].strip()
 
         # 无参：显示当前
         if not arg:
@@ -238,7 +282,7 @@ class QQBotChannel:
             return
 
         # 切换
-        new_path, err = self._resolve_path(user_id, channel_id, arg)
+        new_path, err = await self._resolve_path(user_id, channel_id, arg)
         if err is not None:
             await self._send_message(user_id, channel_id, err)
             return
@@ -265,7 +309,7 @@ class QQBotChannel:
             return
 
         arg = content[len("/ls"):].strip()
-        target, err = self._resolve_path(user_id, channel_id, arg)
+        target, err = await self._resolve_path(user_id, channel_id, arg)
         if err is not None:
             await self._send_message(user_id, channel_id, err)
             return
@@ -319,9 +363,70 @@ class QQBotChannel:
         self, user_id: str, channel_id: str,
     ) -> None:
         """处理 /clear 指令：清除对话历史。"""
-        session = self._bridge.get_session(user_id, channel_id)
+        session = await self._bridge.get_session(user_id, channel_id)
         session.clear_history()
         await self._send_message(user_id, channel_id, "对话历史已清除。")
+
+    # ------------------------------------------------------------------
+    # /restart
+    # ------------------------------------------------------------------
+
+    async def _handle_restart_command(
+        self, user_id: str, channel_id: str,
+    ) -> None:
+        """处理 /restart 指令：以 os.execv 替换当前进程来重启。
+
+        os.execv 会用新进程替换当前进程，保留 pid 和 CWD。
+        通过 --restart-notify CLI 参数将通知信息传给新进程，
+        新进程启动后会向发起重启的用户发送"重启完成"消息。
+        """
+        # 发送"正在重启"（best-effort，失败不影响重启；新进程 on_ready 会发最终通知）
+        try:
+            await self._send_message(user_id, channel_id, "正在重启服务，请稍候...")
+        except Exception:
+            logger.debug("failed to send restarting message", exc_info=True)
+
+        # 重建启动参数：过滤旧的 --config / --restart-notify 及其值，
+        # 替换为解析后的绝对路径和新通知目标
+        filtered_args: list[str] = []
+        skip = 0  # 需要跳过的后续参数个数
+        for arg in sys.argv[1:]:
+            if skip > 0:
+                skip -= 1
+                continue
+            if arg == "--config":
+                skip = 1  # --config 后跟 1 个值
+                continue
+            if arg == "--restart-notify":
+                skip = 2  # --restart-notify 后跟 2 个值
+                continue
+            filtered_args.append(arg)
+
+        restart_argv = [sys.argv[0], *filtered_args]
+        if self._config_path is not None:
+            restart_argv.extend(["--config", str(self._config_path)])
+        restart_argv.extend(["--restart-notify", user_id, channel_id])
+
+        logger.info(
+            "QQBot /restart: user=%s channel=%s, "
+            "config_path=%s, restart_argv=%s",
+            user_id, channel_id, self._config_path, restart_argv,
+        )
+
+        # 1) 关闭 botpy WebSocket — 防止新旧进程同时持有连接 → QQ 4903 冲突
+        await self.stop()
+        # 给 QQ 服务器一点时间感知断连
+        import asyncio
+        await asyncio.sleep(2.0)
+
+        # 关闭 llamacpp server — os.execv 走 _exit(0)，atexit 不会触发
+        try:
+            from agent_core.llm.llamacpp import shutdown_server
+            await shutdown_server()
+        except Exception:
+            logger.exception("failed to shut down llamacpp server")
+
+        os.execv(sys.argv[0], restart_argv)
 
     # ------------------------------------------------------------------
     # /help
@@ -348,3 +453,4 @@ class QQBotChannel:
             await api.post_c2c_message(openid=user_id, msg_type=0, content=content)
         else:
             await api.post_group_message(group_openid=channel_id, msg_type=0, content=content)
+

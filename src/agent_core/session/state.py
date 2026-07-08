@@ -143,7 +143,18 @@ class SessionState:
         """
         if final_messages is None:
             return
-        if self._writer is None or not self._writer.is_open:
+        if self._writer is None:
+            logger.warning(
+                "flush_new_messages: _writer is None (begin_persistence "
+                "was not called or end_persistence closed it) — "
+                "messages NOT persisted!"
+            )
+            return
+        if not self._writer.is_open:
+            logger.warning(
+                "flush_new_messages: _writer.is_open is False — "
+                "messages NOT persisted!"
+            )
             return
 
         if self._is_compaction(final_messages):

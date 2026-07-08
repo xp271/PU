@@ -28,8 +28,8 @@ def _find_config_file() -> Path | None:
     """Locate the first existing config file in priority order.
 
     1. ``$AGENT_CORE_CONFIG`` environment variable (absolute path)
-    2. ``./agent-core.config.json`` (current working directory)
-    3. ``{package_root}/agent-core.config.json``
+    2. ``{package_root}/agent-core.config.json``
+    3. ``./agent-core.config.json`` (current working directory)
     4. ``~/.agent-core/config.json`` (user home)
     """
     candidates: list[Path] = []
@@ -38,10 +38,10 @@ def _find_config_file() -> Path | None:
     if override:
         candidates.append(Path(override).expanduser().resolve())
 
-    candidates.append(Path("agent-core.config.json").resolve())
-
     _pkg_root = Path(__file__).resolve().parent.parent.parent.parent
     candidates.append(_pkg_root / "agent-core.config.json")
+
+    candidates.append(Path("agent-core.config.json").resolve())
 
     candidates.append(Path.home() / ".agent-core" / "config.json")
 

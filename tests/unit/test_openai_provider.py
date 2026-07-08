@@ -95,9 +95,9 @@ class TestNormalizeStopReason:
         assert mapped == "end_turn"
         assert detail is None
 
-    def test_length_maps_to_max_turns(self) -> None:
+    def test_length_maps_to_output_truncated(self) -> None:
         mapped, detail = OpenAIClient.normalize_stop_reason("length")
-        assert mapped == "max_turns"
+        assert mapped == "output_truncated"
         assert detail is None
 
     def test_tool_calls_maps_to_end_turn(self) -> None:
