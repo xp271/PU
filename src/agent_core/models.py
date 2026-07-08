@@ -94,7 +94,7 @@ class ModelId:
 
         raise ValueError(
             f"Cannot parse model '{raw}': no provider prefix and not a known "
-            f"Anthropic model. Use format 'provider/model-name', e.g. 'openai/gpt-4o'."
+            f"Anthropic model. Use format 'provider/model-name', e.g. 'anthropic/claude-sonnet-4-5'."
         )
 
     @classmethod

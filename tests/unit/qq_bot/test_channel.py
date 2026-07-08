@@ -137,11 +137,11 @@ class TestCdCommand:
 
     @pytest.mark.asyncio
     async def test_cd_no_arg_shows_current(self, channel: QQBotChannel):
-        """/cd 无参显示当前工作目录。"""
+        """/cdp 无参显示当前工作目录。"""
         mock_api = _setup_mock_api(channel)
         channel._agent_config.workspace_root = "C:\\PU"
 
-        await channel.handle_message("u1", "c2c", "/cd", "text")
+        await channel.handle_message("u1", "c2c", "/cdp", "text")
 
         mock_api.post_c2c_message.assert_called_once()
         content = mock_api.post_c2c_message.call_args.kwargs["content"]
@@ -149,24 +149,24 @@ class TestCdCommand:
 
     @pytest.mark.asyncio
     async def test_cd_shows_override_when_set(self, channel: QQBotChannel):
-        """/cd 优先显示 workspace_override。"""
+        """/cdp优先显示 workspace_override。"""
         mock_api = _setup_mock_api(channel)
         channel._agent_config.workspace_root = "C:\\PU"
         session = await channel._bridge.get_session("u1", "c2c")
         session.workspace_override = "D:\\other"
 
-        await channel.handle_message("u1", "c2c", "/cd", "text")
+        await channel.handle_message("u1", "c2c", "/cdp", "text")
 
         content = mock_api.post_c2c_message.call_args.kwargs["content"]
         assert "D:\\other" in content
 
     @pytest.mark.asyncio
     async def test_cd_switch_success(self, channel: QQBotChannel):
-        """/cd <path> 切换并清空历史。"""
+        """/cdp<path> 切换并清空历史。"""
         mock_api = _setup_mock_api(channel)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            await channel.handle_message("u1", "c2c", f"/cd {tmpdir}", "text")
+            await channel.handle_message("u1", "c2c", f"/cdp{tmpdir}", "text")
 
             session = await channel._bridge.get_session("u1", "c2c")
             assert session.workspace_override == os.path.abspath(tmpdir)
@@ -177,10 +177,10 @@ class TestCdCommand:
 
     @pytest.mark.asyncio
     async def test_cd_switch_dir_not_exist(self, channel: QQBotChannel):
-        """/cd 不存在的目录应报错，session 不变。"""
+        """/cdp不存在的目录应报错，session 不变。"""
         mock_api = _setup_mock_api(channel)
 
-        await channel.handle_message("u1", "c2c", "/cd Z:/does_not_exist", "text")
+        await channel.handle_message("u1", "c2c", "/cdpZ:/does_not_exist", "text")
 
         session = await channel._bridge.get_session("u1", "c2c")
         assert session.workspace_override is None
@@ -190,13 +190,13 @@ class TestCdCommand:
 
     @pytest.mark.asyncio
     async def test_cd_reset(self, channel: QQBotChannel):
-        """/cd --reset 清除 override。"""
+        """/cdp--reset 清除 override。"""
         mock_api = _setup_mock_api(channel)
         channel._agent_config.workspace_root = "C:\\PU"
         session = await channel._bridge.get_session("u1", "c2c")
         session.workspace_override = "D:\\other"
 
-        await channel.handle_message("u1", "c2c", "/cd --reset", "text")
+        await channel.handle_message("u1", "c2c", "/cdp--reset", "text")
 
         assert session.workspace_override is None
         assert session.messages == []
@@ -209,18 +209,18 @@ class TestCdCommand:
         mock_api = _setup_mock_api(channel)
         channel._config.allow_shell_commands = False
 
-        await channel.handle_message("u1", "c2c", "/cd D:\\test", "text")
+        await channel.handle_message("u1", "c2c", "/cdpD:\\test", "text")
 
         content = mock_api.post_c2c_message.call_args.kwargs["content"]
         assert "未启用" in content
 
     @pytest.mark.asyncio
     async def test_cd_group_chat(self, channel: QQBotChannel):
-        """/cd 在群聊中也正常工作。"""
+        """/cdp在群聊中也正常工作。"""
         mock_api = _setup_mock_api(channel)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            await channel.handle_message("u1", "group123", f"/cd {tmpdir}", "text")
+            await channel.handle_message("u1", "group123", f"/cdp{tmpdir}", "text")
 
             mock_api.post_group_message.assert_called_once()
             content = mock_api.post_group_message.call_args.kwargs["content"]
@@ -228,24 +228,24 @@ class TestCdCommand:
 
     @pytest.mark.asyncio
     async def test_cd_no_agent_config_ws(self, channel: QQBotChannel):
-        """/cd 无参且 workspace_root=None 时回退 os.getcwd()。"""
+        """/cdp 无参且 workspace_root=None 时回退 os.getcwd()。"""
         mock_api = _setup_mock_api(channel)
         channel._agent_config.workspace_root = None
 
-        await channel.handle_message("u1", "c2c", "/cd", "text")
+        await channel.handle_message("u1", "c2c", "/cdp", "text")
 
         content = mock_api.post_c2c_message.call_args.kwargs["content"]
         assert "(默认)" in content or "当前工作目录:" in content
 
     @pytest.mark.asyncio
     async def test_cd_relative_path(self, channel: QQBotChannel):
-        """/cd subdir 相对路径应正确解析。"""
+        """/cdpsubdir 相对路径应正确解析。"""
         mock_api = _setup_mock_api(channel)
         channel._agent_config.workspace_root = os.getcwd()
 
         with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
             rel_name = os.path.basename(tmpdir)
-            await channel.handle_message("u1", "c2c", f"/cd {rel_name}", "text")
+            await channel.handle_message("u1", "c2c", f"/cdp{rel_name}", "text")
 
             session = await channel._bridge.get_session("u1", "c2c")
             assert session.workspace_override == os.path.abspath(tmpdir)
@@ -255,7 +255,7 @@ class TestCdCommand:
 
     @pytest.mark.asyncio
     async def test_cd_parent_dir_clamped(self, channel: QQBotChannel):
-        """/cd .. 被 clamp 在原始 workspace_root 内。"""
+        """/cdp.. 被 clamp 在原始 workspace_root 内。"""
         mock_api = _setup_mock_api(channel)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -266,7 +266,7 @@ class TestCdCommand:
             session = await channel._bridge.get_session("u1", "c2c")
             session.workspace_override = child
 
-            await channel.handle_message("u1", "c2c", "/cd ..", "text")
+            await channel.handle_message("u1", "c2c", "/cdp..", "text")
 
             content = mock_api.post_c2c_message.call_args.kwargs["content"]
             # 应该被拒绝，因为 .. 会跳出 workspace_root(child)
@@ -274,23 +274,23 @@ class TestCdCommand:
 
     @pytest.mark.asyncio
     async def test_cd_absolute_outside_root(self, channel: QQBotChannel):
-        """/cd 绝对路径超出 workspace_root 应被拒绝。"""
+        """/cdp绝对路径超出 workspace_root 应被拒绝。"""
         mock_api = _setup_mock_api(channel)
         channel._agent_config.workspace_root = "C:\\some-narrow-dir"
 
-        await channel.handle_message("u1", "c2c", "/cd C:\\Windows", "text")
+        await channel.handle_message("u1", "c2c", "/cdpC:\\Windows", "text")
 
         content = mock_api.post_c2c_message.call_args.kwargs["content"]
         assert "无法切换" in content
 
     @pytest.mark.asyncio
     async def test_full_cd_flow_to_agent(self, channel: QQBotChannel):
-        """/cd 切换后，下一条正常消息应使用覆盖后的 workspace_root。"""
+        """/cdp切换后，下一条正常消息应使用覆盖后的 workspace_root。"""
         mock_api = _setup_mock_api(channel)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Step 1: switch workspace
-            await channel.handle_message("u1", "c2c", f"/cd {tmpdir}", "text")
+            await channel.handle_message("u1", "c2c", f"/cdp{tmpdir}", "text")
             session = await channel._bridge.get_session("u1", "c2c")
             expected = os.path.abspath(tmpdir)
             assert session.workspace_override == expected
@@ -311,8 +311,8 @@ class TestCdCommand:
         mock_api = _setup_mock_api(channel)
 
         with tempfile.TemporaryDirectory() as t1, tempfile.TemporaryDirectory() as t2:
-            await channel.handle_message("u1", "groupX", f"/cd {t1}", "text")
-            await channel.handle_message("u2", "groupX", f"/cd {t2}", "text")
+            await channel.handle_message("u1", "groupX", f"/cdp{t1}", "text")
+            await channel.handle_message("u2", "groupX", f"/cdp{t2}", "text")
 
             s1 = await channel._bridge.get_session("u1", "groupX")
             s2 = await channel._bridge.get_session("u2", "groupX")
@@ -482,7 +482,7 @@ class TestHelpCommand:
         await channel.handle_message("u1", "c2c", "/help", "text")
 
         content = mock_api.post_c2c_message.call_args.kwargs["content"]
-        assert "/cd" in content
+        assert "/cdp" in content
         assert "/ls" in content
         assert "/clear" in content
         assert "/help" in content
@@ -496,7 +496,7 @@ class TestHelpCommand:
         await channel.handle_message("u1", "c2c", "/help", "text")
 
         content = mock_api.post_c2c_message.call_args.kwargs["content"]
-        assert "/cd" in content  # help 正常显示
+        assert "/cdp" in content  # help 正常显示
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -548,7 +548,7 @@ class TestAllowShellCommandsFlag:
         mock_api = _setup_mock_api(channel)
         channel._config.allow_shell_commands = False
 
-        await channel.handle_message("u1", "c2c", "/cd", "text")
+        await channel.handle_message("u1", "c2c", "/cdp", "text")
         assert "未启用" in mock_api.post_c2c_message.call_args.kwargs["content"]
 
     @pytest.mark.asyncio
@@ -576,7 +576,7 @@ class TestAllowShellCommandsFlag:
         channel._config.allow_shell_commands = False
 
         await channel.handle_message("u1", "c2c", "/help", "text")
-        assert "/cd" in mock_api.post_c2c_message.call_args.kwargs["content"]
+        assert "/cdp" in mock_api.post_c2c_message.call_args.kwargs["content"]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -686,14 +686,14 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_cd_path_with_spaces(self, channel: QQBotChannel):
-        """/cd 到带空格的路径（如 Windows 常见）"""
+        """/cdp到带空格的路径（如 Windows 常见）"""
         mock_api = _setup_mock_api(channel)
         channel._agent_config.workspace_root = tempfile.gettempdir()
 
         spaced_dir = os.path.join(tempfile.gettempdir(), "test dir with spaces")
         os.makedirs(spaced_dir, exist_ok=True)
         try:
-            await channel.handle_message("u1", "c2c", "/cd " + spaced_dir, "text")
+            await channel.handle_message("u1", "c2c", "/cdp" + spaced_dir, "text")
 
             content = mock_api.post_c2c_message.call_args.kwargs["content"]
             assert "已切换" in content

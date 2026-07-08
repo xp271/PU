@@ -27,7 +27,7 @@ class TestQQBotConfig:
     def test_defaults(self):
         """验证默认值。"""
         cfg = QQBotConfig(app_id="x", app_secret="y")
-        assert cfg.model == "anthropic/claude-sonnet-4-5"
+        assert cfg.model is None
         assert cfg.max_turns == 20
         assert cfg.tools == ["*"]
         assert cfg.permission_mode == "bypassPermissions"

@@ -279,6 +279,13 @@ async def _run_turns(
         )
 
     model_id = config.model_id
+
+    # -- llamacpp: ensure local server is running before first request -------
+    logger.debug("query: model=%s provider=%s — ensuring llamacpp server",
+                 model_id, model_id.provider)
+    from ..llm.llamacpp import ensure_server  # noqa: PLC0415
+    await ensure_server(config)
+
     client = get_client(model_id, config)
     tools_schema = client.__class__.convert_tools(
         config.tools, registry=registry

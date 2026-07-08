@@ -25,20 +25,33 @@ logger = logging.getLogger("agent_core.qq_bot.channel")
 
 _QQBOT_HELP = """\
 QQBot 可用指令:
-  /cd [路径]      切换工作目录（支持相对/绝对路径，.. 返回上级）
-  /cd --reset     重置为默认工作目录
+  /cdp [路径]     切换工作目录（支持相对/绝对路径，.. 返回上级）
+  /cdp --reset    重置为默认工作目录
   /ls [路径]      列出目录内容（一级，可选子路径）
   /clear          清除对话历史
   /restart        重启服务（使配置更改生效）
   /help           显示此帮助"""
 
 
-def _load_global_agent_config() -> AgentConfig | None:
-    """从 agent-core.config.json 加载基础 AgentConfig，复用 CLI 的加载逻辑。"""
+def _load_global_agent_config(config_path: Path | None = None) -> AgentConfig | None:
+    """从 agent-core.config.json 加载基础 AgentConfig，复用 CLI 的加载逻辑。
+
+    config_path 指定后优先使用，避免 auto-discover 找到错误文件。
+    返回 None 表示加载失败（配置缺失或 API key 未设置），调用方应记录错误。
+    """
     from agent_core.cli._config import _find_config_file, _load_config  # noqa: PLC0415
     try:
-        return _load_config()
+        if config_path is not None:
+            cfg = _load_config(config_path_override=str(config_path.resolve()))
+        else:
+            cfg = _load_config()
+        logger.debug("Agent config loaded: model=%s", cfg.model)
+        return cfg
     except SystemExit:
+        logger.error(
+            "_load_global_agent_config failed: config_path=%s",
+            config_path,
+        )
         return None
 
 
@@ -55,8 +68,19 @@ class QQBotChannel:
         self._config_path = config_path
         self._client: QQBotClient | None = None
 
-        base_agent_config = _load_global_agent_config()
+        base_agent_config = _load_global_agent_config(config_path)
+        if base_agent_config is None:
+            logger.warning(
+                "Failed to load agent config (config_path=%s); "
+                "using defaults — API keys may be missing",
+                config_path,
+            )
         self._agent_config = config.to_agent_config(base_agent_config)
+        logger.info(
+            "QQBotChannel initialized: model=%s, api_keys=%s",
+            self._agent_config.model,
+            list(self._agent_config.api_keys.keys()),
+        )
         from agent_core.bridge.agent_bridge import AgentBridge
         self._bridge = AgentBridge(
             self._agent_config,
@@ -95,7 +119,17 @@ class QQBotChannel:
         await asyncio.to_thread(_run_bot)
 
     async def stop(self) -> None:
-        pass  # botpy 内部管理连接生命周期
+        """关闭 botpy WebSocket 连接。
+
+        os.execv 在 Windows 上走 _exit(0)，不会等 WebSocket 优雅关闭，
+        导致新旧进程同时持有连接 → QQ Bot API 返回 4903 冲突。
+        这里显式 close 后再 execv，避免双连接竞态。
+        """
+        if self._client is not None:
+            try:
+                await self._client.close()
+            except Exception:
+                logger.exception("error closing botpy client")
 
     # ------------------------------------------------------------------
     # 消息处理
@@ -139,7 +173,7 @@ class QQBotChannel:
         self, user_id: str, channel_id: str, content: str,
     ) -> None:
         """将 shell 指令分发到对应处理器。"""
-        if content.startswith("/cd"):
+        if content.startswith("/cdp"):
             await self._handle_cd_command(user_id, channel_id, content)
         elif content.startswith("/ls"):
             await self._handle_ls_command(user_id, channel_id, content)
@@ -203,13 +237,13 @@ class QQBotChannel:
         return target, None
 
     # ------------------------------------------------------------------
-    # /cd
+    # /cdp
     # ------------------------------------------------------------------
 
     async def _handle_cd_command(
         self, user_id: str, channel_id: str, content: str,
     ) -> None:
-        """处理 /cd 指令：查看、切换或重置工作目录。"""
+        """处理 /cdp 指令：查看、切换或重置工作目录。"""
         if not self._config.allow_shell_commands:
             await self._send_message(
                 user_id, channel_id, "Shell 指令功能未启用。",
@@ -217,7 +251,7 @@ class QQBotChannel:
             return
 
         session = await self._bridge.get_session(user_id, channel_id)
-        arg = content[len("/cd"):].strip()
+        arg = content[len("/cdp"):].strip()
 
         # 无参：显示当前
         if not arg:
@@ -346,24 +380,25 @@ class QQBotChannel:
         通过 --restart-notify CLI 参数将通知信息传给新进程，
         新进程启动后会向发起重启的用户发送"重启完成"消息。
         """
-        logger.info("QQBot /restart from user=%s channel=%s", user_id, channel_id)
-
         # 发送"正在重启"（best-effort，失败不影响重启；新进程 on_ready 会发最终通知）
         try:
             await self._send_message(user_id, channel_id, "正在重启服务，请稍候...")
         except Exception:
             logger.debug("failed to send restarting message", exc_info=True)
 
-        # 重建启动参数：过滤旧的 --config / --restart-notify，
+        # 重建启动参数：过滤旧的 --config / --restart-notify 及其值，
         # 替换为解析后的绝对路径和新通知目标
         filtered_args: list[str] = []
-        skip_next = False
+        skip = 0  # 需要跳过的后续参数个数
         for arg in sys.argv[1:]:
-            if skip_next:
-                skip_next = False
+            if skip > 0:
+                skip -= 1
                 continue
-            if arg in ("--config", "--restart-notify"):
-                skip_next = True
+            if arg == "--config":
+                skip = 1  # --config 后跟 1 个值
+                continue
+            if arg == "--restart-notify":
+                skip = 2  # --restart-notify 后跟 2 个值
                 continue
             filtered_args.append(arg)
 
@@ -371,6 +406,25 @@ class QQBotChannel:
         if self._config_path is not None:
             restart_argv.extend(["--config", str(self._config_path)])
         restart_argv.extend(["--restart-notify", user_id, channel_id])
+
+        logger.info(
+            "QQBot /restart: user=%s channel=%s, "
+            "config_path=%s, restart_argv=%s",
+            user_id, channel_id, self._config_path, restart_argv,
+        )
+
+        # 1) 关闭 botpy WebSocket — 防止新旧进程同时持有连接 → QQ 4903 冲突
+        await self.stop()
+        # 给 QQ 服务器一点时间感知断连
+        import asyncio
+        await asyncio.sleep(2.0)
+
+        # 关闭 llamacpp server — os.execv 走 _exit(0)，atexit 不会触发
+        try:
+            from agent_core.llm.llamacpp import shutdown_server
+            await shutdown_server()
+        except Exception:
+            logger.exception("failed to shut down llamacpp server")
 
         os.execv(sys.argv[0], restart_argv)
 

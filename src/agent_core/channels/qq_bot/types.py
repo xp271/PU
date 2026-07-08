@@ -30,7 +30,7 @@ class QQBotConfig(BaseModel):
     )
 
     # Agent 配置 overlay
-    model: str = Field(default="anthropic/claude-sonnet-4-5")
+    model: str | None = Field(default=None)
     max_turns: int = Field(default=20, ge=1, le=500)
     permission_mode: PermissionMode = Field(
         default="bypassPermissions",
@@ -48,8 +48,24 @@ class QQBotConfig(BaseModel):
 
     def to_agent_config(self, base: AgentConfig | None = None) -> AgentConfig:
         """将 QQ 机器人相关 Agent 字段与基础配置合并。"""
+        import logging
+        _log = logging.getLogger("agent_core.qq_bot.channel")
+
         cfg = base.model_copy(deep=True) if base else AgentConfig()
-        cfg.model = self.model
+        base_model = cfg.model
+
+        if self.model is not None:
+            cfg.model = self.model
+            _log.info(
+                "Model override: qq_bot.model=%s → final=%s (base was %s)",
+                self.model, cfg.model, base_model,
+            )
+        else:
+            _log.info(
+                "Model from base config: %s (qq_bot.model not set)",
+                cfg.model,
+            )
+
         cfg.max_turns = self.max_turns
         cfg.permission_mode = self.permission_mode
         cfg.tools = self.tools

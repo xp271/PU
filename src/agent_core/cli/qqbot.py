@@ -170,6 +170,8 @@ async def _cmd_start(
     _setup_logging()
 
     logger = logging.getLogger("agent_core.qq_bot")
+    logger.info("sys.argv=%s, config_path=%s, resolved_path=%s",
+                sys.argv, config_path, resolved_path)
 
     base = _load_agent_config(config_path)
     logger.info(f"base agent config: model={base.model}")
